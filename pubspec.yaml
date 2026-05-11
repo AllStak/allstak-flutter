@@ -3,6 +3,7 @@ description: "Official AllStak Flutter SDK — error tracking, structured logs, 
 version: 1.0.2
 homepage: https://allstak.sa
 repository: https://github.com/AllStak/allstak-flutter
+issue_tracker: https://github.com/AllStak/allstak-flutter/issues
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
