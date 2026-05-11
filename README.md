@@ -3,7 +3,7 @@
 **Crash reporting and logs for Flutter apps. iOS, Android, and web from a single SDK.**
 
 [![pub.dev](https://img.shields.io/pub/v/allstak_flutter.svg)](https://pub.dev/packages/allstak_flutter)
-[![CI](https://github.com/allstak-io/allstak-flutter/actions/workflows/ci.yml/badge.svg)](https://github.com/allstak-io/allstak-flutter/actions)
+[![CI](https://github.com/AllStak/allstak-flutter/actions/workflows/ci.yml/badge.svg)](https://github.com/AllStak/allstak-flutter/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Official AllStak SDK for Flutter and Dart — captures Flutter framework errors, unhandled Dart zone errors, HTTP requests, and structured logs, with iOS and Android native crash hooks.
@@ -132,7 +132,7 @@ const AllStakConfig(
 
 - Documentation: https://docs.allstak.sa
 - Dashboard: https://app.allstak.sa
-- Source: https://github.com/allstak-io/allstak-flutter
+- Source: https://github.com/AllStak/allstak-flutter
 
 ## License
 
