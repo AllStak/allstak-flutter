@@ -2,7 +2,7 @@ name: allstak_flutter
 description: "Official AllStak Flutter SDK — error tracking, structured logs, HTTP monitoring, distributed tracing, and cron monitoring for Flutter and Dart applications."
 version: 1.0.2
 homepage: https://allstak.sa
-repository: https://github.com/abdualziz-urnt/allstak-flutter
+repository: https://github.com/AllStak/allstak-flutter
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
