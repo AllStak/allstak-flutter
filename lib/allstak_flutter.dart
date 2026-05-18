@@ -11,6 +11,8 @@ import 'package:flutter/widgets.dart' hide runApp;
 import 'package:flutter/widgets.dart' as widgets show runApp;
 import 'package:http/http.dart' as http;
 
+import 'sanitizer.dart';
+
 AllStak? _instance;
 
 /// Thin wrapper so the MethodChannel name lives in one place and can be
@@ -40,6 +42,7 @@ class AllStakConfig {
   final String platform;
   final String sdkName;
   final String sdkVersion;
+  final Duration transportTimeout;
 
   const AllStakConfig({
     required this.apiKey,
@@ -55,6 +58,7 @@ class AllStakConfig {
     this.platform = 'flutter',
     this.sdkName = kAllStakSdkName,
     this.sdkVersion = kAllStakSdkVersion,
+    this.transportTimeout = const Duration(seconds: 2),
   });
 
   /// Release-tracking tags merged into every event payload's metadata so the
@@ -76,6 +80,7 @@ class AllStak {
   final Map<String, String> _tags = {};
   String? _userId;
   String? _userEmail;
+  final List<Future<void>> _pendingRequests = [];
 
   AllStak._(this.config) {
     _tags.addAll(config.tags);
@@ -186,7 +191,7 @@ class AllStak {
     // them as e.g. `#0  MyClass.method (package:foo/foo.dart:42:5)` —
     // parse into the v2 ErrorIngestRequest.Frame shape.
     final structured = _parseDartFrames(stackLines);
-    await _send('/ingest/v1/errors', {
+    _sendBestEffort('/ingest/v1/errors', {
       'exceptionClass': className,
       'message': message,
       // Backend expects `stackTrace: List<String>`, not a single `stacktrace` string.
@@ -242,7 +247,7 @@ class AllStak {
   }
 
   Future<void> captureMessage(String message, {String level = 'info'}) async {
-    await _send('/ingest/v1/errors', {
+    _sendBestEffort('/ingest/v1/errors', {
       'exceptionClass': 'Message',
       'message': message,
       'environment': config.environment,
@@ -266,7 +271,7 @@ class AllStak {
     String message, {
     Map<String, String>? metadata,
   }) async {
-    await _send('/ingest/v1/logs', {
+    _sendBestEffort('/ingest/v1/logs', {
       'level': level,
       'message': message,
       'service': config.service,
@@ -305,13 +310,17 @@ class AllStak {
     required int statusCode,
     required int durationMs,
     String direction = 'outbound',
+    String? traceId,
+    String? requestId,
+    String? spanId,
   }) async {
-    final traceId =
-        'flt-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
-    await _send('/ingest/v1/http-requests', {
+    final effectiveTraceId = traceId ?? _hexId(16);
+    final effectiveRequestId = requestId ?? effectiveTraceId;
+    _sendBestEffort('/ingest/v1/http-requests', {
       'requests': [
         {
-          'traceId': traceId,
+          'traceId': effectiveTraceId,
+          if (spanId != null) 'spanId': spanId,
           'direction': direction,
           'method': method,
           'host': host,
@@ -323,9 +332,18 @@ class AllStak {
           'timestamp': DateTime.now().toUtc().toIso8601String(),
           'environment': config.environment,
           'release': config.release,
+          'metadata': {
+            ..._tags,
+            'requestId': effectiveRequestId,
+          },
         }
       ]
     });
+  }
+
+  String _hexId(int bytes) {
+    final raw = DateTime.now().microsecondsSinceEpoch.toRadixString(16);
+    return raw.padLeft(bytes * 2, '0').substring(0, bytes * 2);
   }
 
   /// Installs platform-side uncaught exception handlers (Android Kotlin /
@@ -345,7 +363,7 @@ class AllStak {
         try {
           // Payload from native side is already DTO-compatible — ship as-is
           // under the customer's api key.
-          await _send('/ingest/v1/errors', _decodeNativeCrash(raw));
+          _sendBestEffort('/ingest/v1/errors', _decodeNativeCrash(raw));
         } catch (_) {}
       }
     } catch (_) {
@@ -359,7 +377,19 @@ class AllStak {
     return <String, dynamic>{};
   }
 
-  Future<void> flush() async {}
+  /// Force-send all queued/buffered events immediately and wait for every
+  /// pending HTTP request to complete (or time out).  Safe to call before
+  /// the app is paused or terminated so no telemetry is lost.
+  Future<void> flush() async {
+    // Snapshot the list so new sends that arrive while we await don't
+    // cause a concurrent-modification issue.
+    final pending = List<Future<void>>.from(_pendingRequests);
+    _pendingRequests.clear();
+    if (pending.isEmpty) return;
+    // Wait for all in-flight requests.  Individual _send calls already
+    // swallow their own exceptions so this won't throw.
+    await Future.wait(pending, eagerError: false);
+  }
 
   String _platformTag() {
     try {
@@ -373,6 +403,14 @@ class AllStak {
     return 'flutter';
   }
 
+  void _sendBestEffort(String path, Map<String, dynamic> payload) {
+    if (config.apiKey.isEmpty) return;
+    final future = _send(path, payload);
+    _pendingRequests.add(future);
+    // Auto-remove from the list when it completes so we don't leak memory.
+    future.whenComplete(() => _pendingRequests.remove(future));
+  }
+
   Future<void> _send(String path, Map<String, dynamic> payload) async {
     final url = Uri.parse('${config.host}$path');
     final merged = {
@@ -382,7 +420,23 @@ class AllStak {
         'device.platform': _platformTag(),
       },
     };
-    final body = jsonEncode(merged);
+    // Scrub the full wire payload before serialization. One chokepoint
+    // protects every telemetry type (errors, logs, http, native crashes).
+    // Pure (no mutation), mobile-safe (synchronous), fail-open.
+    Map<String, dynamic> scrubbed;
+    try {
+      final out = scrub(merged);
+      scrubbed = out is Map<String, dynamic>
+          ? out
+          : (out is Map ? Map<String, dynamic>.from(out) : merged);
+    } catch (sanErr) {
+      if (config.debug) {
+        // ignore: avoid_print
+        print('[AllStak] sanitizer failed; sending raw: $sanErr');
+      }
+      scrubbed = merged;
+    }
+    final body = jsonEncode(scrubbed);
     try {
       final res = await http
           .post(
@@ -394,7 +448,7 @@ class AllStak {
             },
             body: body,
           )
-          .timeout(const Duration(seconds: 5));
+          .timeout(config.transportTimeout);
       if (config.debug) {
         final trim =
             res.body.length > 160 ? res.body.substring(0, 160) : res.body;
@@ -438,6 +492,14 @@ class _AllStakHttpClient extends http.BaseClient {
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
     final url = request.url.toString();
     final isOwnIngest = url.startsWith(_allstak.config.host);
+    final traceId = _allstak._hexId(16);
+    final spanId = _allstak._hexId(8);
+    final requestId = traceId;
+    if (!isOwnIngest) {
+      request.headers.putIfAbsent('traceparent', () => '00-$traceId-$spanId-01');
+      request.headers.putIfAbsent('x-allstak-trace-id', () => traceId);
+      request.headers.putIfAbsent('x-allstak-request-id', () => requestId);
+    }
     final sw = Stopwatch()..start();
     try {
       final resp = await _inner.send(request);
@@ -452,6 +514,9 @@ class _AllStakHttpClient extends http.BaseClient {
           statusCode: resp.statusCode,
           durationMs: sw.elapsedMilliseconds,
           direction: 'outbound',
+          traceId: traceId,
+          requestId: requestId,
+          spanId: spanId,
         );
       }
       return resp;
@@ -466,6 +531,9 @@ class _AllStakHttpClient extends http.BaseClient {
           statusCode: 0,
           durationMs: sw.elapsedMilliseconds,
           direction: 'outbound',
+          traceId: traceId,
+          requestId: requestId,
+          spanId: spanId,
         );
       }
       rethrow;
