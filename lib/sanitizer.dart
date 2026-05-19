@@ -13,6 +13,8 @@
 /// - Cycle protection via identityHashCode set.
 /// - Pure: returns a sanitized copy; never mutates caller-owned structures.
 /// - Mobile-safe: synchronous, no I/O, no blocking calls.
+library;
+
 
 const String kRedacted = '[REDACTED]';
 
