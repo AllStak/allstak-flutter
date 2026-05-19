@@ -15,6 +15,10 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
+          # Pin Flutter (and its bundled Dart formatter) so the
+          # Format-check step is deterministic and not sensitive to
+          # Flutter stable-channel rotations.
+          flutter-version: '3.35.5'
           channel: 'stable'
           cache: true
 
