@@ -19,24 +19,20 @@ void main() {
     });
 
     test('recurses into nested map', () {
-      final out =
-          scrub({
-                'user': {'email': 'a@b', 'password': 'p'},
-              })
-              as Map;
+      final out = scrub({
+        'user': {'email': 'a@b', 'password': 'p'},
+      }) as Map;
       expect((out['user'] as Map)['email'], 'a@b');
       expect((out['user'] as Map)['password'], kRedacted);
     });
 
     test('recurses into list', () {
-      final out =
-          scrub({
-                'items': [
-                  {'token': 't'},
-                  {'safe': 'v'},
-                ],
-              })
-              as Map;
+      final out = scrub({
+        'items': [
+          {'token': 't'},
+          {'safe': 'v'},
+        ],
+      }) as Map;
       final items = out['items'] as List;
       expect((items[0] as Map)['token'], kRedacted);
       expect((items[1] as Map)['safe'], 'v');

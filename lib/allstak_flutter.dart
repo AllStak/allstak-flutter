@@ -176,11 +176,10 @@ class AllStak {
     final className = error is Error
         ? error.runtimeType.toString()
         : error is Exception
-        ? error.runtimeType.toString()
-        : 'DartError';
+            ? error.runtimeType.toString()
+            : 'DartError';
     final message = error is String ? error : error.toString();
-    final rawStack =
-        stackTrace ??
+    final rawStack = stackTrace ??
         (error is Error ? error.stackTrace?.toString() ?? '' : '');
     final stackLines = rawStack
         .split('\n')
@@ -453,9 +452,8 @@ class AllStak {
           )
           .timeout(config.transportTimeout);
       if (config.debug) {
-        final trim = res.body.length > 160
-            ? res.body.substring(0, 160)
-            : res.body;
+        final trim =
+            res.body.length > 160 ? res.body.substring(0, 160) : res.body;
         // ignore: avoid_print
         print('[AllStak] POST $path -> ${res.statusCode} $trim');
       }
@@ -515,8 +513,7 @@ class _AllStakHttpClient extends http.BaseClient {
         // fire-and-forget — don't block the caller on ingest
         _allstak.captureRequest(
           method: request.method,
-          host:
-              request.url.host +
+          host: request.url.host +
               (request.url.hasPort ? ':${request.url.port}' : ''),
           path: request.url.path.isEmpty ? '/' : request.url.path,
           statusCode: resp.statusCode,
@@ -533,8 +530,7 @@ class _AllStakHttpClient extends http.BaseClient {
       if (!isOwnIngest) {
         _allstak.captureRequest(
           method: request.method,
-          host:
-              request.url.host +
+          host: request.url.host +
               (request.url.hasPort ? ':${request.url.port}' : ''),
           path: request.url.path.isEmpty ? '/' : request.url.path,
           statusCode: 0,
