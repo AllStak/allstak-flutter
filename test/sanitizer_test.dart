@@ -11,7 +11,8 @@ void main() {
     });
 
     test('case-insensitive key match', () {
-      final out = scrub({'X-Api-Key': 'k', 'PASSWORD': 'p', 'safe': 'v'}) as Map;
+      final out =
+          scrub({'X-Api-Key': 'k', 'PASSWORD': 'p', 'safe': 'v'}) as Map;
       expect(out['X-Api-Key'], kRedacted);
       expect(out['PASSWORD'], kRedacted);
       expect(out['safe'], 'v');
@@ -19,7 +20,7 @@ void main() {
 
     test('recurses into nested map', () {
       final out = scrub({
-        'user': {'email': 'a@b', 'password': 'p'}
+        'user': {'email': 'a@b', 'password': 'p'},
       }) as Map;
       expect((out['user'] as Map)['email'], 'a@b');
       expect((out['user'] as Map)['password'], kRedacted);
@@ -29,8 +30,8 @@ void main() {
       final out = scrub({
         'items': [
           {'token': 't'},
-          {'safe': 'v'}
-        ]
+          {'safe': 'v'},
+        ],
       }) as Map;
       final items = out['items'] as List;
       expect((items[0] as Map)['token'], kRedacted);
