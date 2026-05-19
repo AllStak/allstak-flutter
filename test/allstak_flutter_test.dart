@@ -103,25 +103,31 @@ void main() {
 
   // ─── Fail-open behavior ───────────────────────────────────────────
   group('fail-open', () {
-    test('captureException returns immediately when ingest is unreachable',
-        () async {
-      final sdk = AllStak.init(const AllStakConfig(
-        apiKey: 'ask_test',
-        host: 'http://127.0.0.1:1',
-        transportTimeout: Duration(milliseconds: 50),
-      ));
-      final sw = Stopwatch()..start();
-      await sdk.captureException('fail-open');
-      sw.stop();
-      expect(sw.elapsedMilliseconds, lessThan(25));
-    });
+    test(
+      'captureException returns immediately when ingest is unreachable',
+      () async {
+        final sdk = AllStak.init(
+          const AllStakConfig(
+            apiKey: 'ask_test',
+            host: 'http://127.0.0.1:1',
+            transportTimeout: Duration(milliseconds: 50),
+          ),
+        );
+        final sw = Stopwatch()..start();
+        await sdk.captureException('fail-open');
+        sw.stop();
+        expect(sw.elapsedMilliseconds, lessThan(25));
+      },
+    );
 
     test('captureLog returns immediately when ingest is unreachable', () async {
-      final sdk = AllStak.init(const AllStakConfig(
-        apiKey: 'ask_test',
-        host: 'http://127.0.0.1:1',
-        transportTimeout: Duration(milliseconds: 50),
-      ));
+      final sdk = AllStak.init(
+        const AllStakConfig(
+          apiKey: 'ask_test',
+          host: 'http://127.0.0.1:1',
+          transportTimeout: Duration(milliseconds: 50),
+        ),
+      );
       final sw = Stopwatch()..start();
       await sdk.captureLog('info', 'fail-open');
       sw.stop();
@@ -151,12 +157,14 @@ void main() {
     });
 
     test('sends structured error payload to /ingest/v1/errors', () async {
-      final sdk = AllStak.init(AllStakConfig(
-        apiKey: 'ask_test',
-        host: server.host,
-        environment: 'test',
-        release: 'v0.1.0',
-      ));
+      final sdk = AllStak.init(
+        AllStakConfig(
+          apiKey: 'ask_test',
+          host: server.host,
+          environment: 'test',
+          release: 'v0.1.0',
+        ),
+      );
 
       await sdk.captureException(
         'Something broke',
@@ -177,10 +185,9 @@ void main() {
     });
 
     test('includes user info when setUser was called', () async {
-      final sdk = AllStak.init(AllStakConfig(
-        apiKey: 'ask_test',
-        host: server.host,
-      ));
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
       sdk.setUser(id: 'u42', email: 'test@allstak.io');
 
       await sdk.captureException('with-user');
@@ -193,10 +200,9 @@ void main() {
     });
 
     test('includes custom tags in metadata', () async {
-      final sdk = AllStak.init(AllStakConfig(
-        apiKey: 'ask_test',
-        host: server.host,
-      ));
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
       sdk.setTag('team', 'backend');
 
       await sdk.captureException('tagged');
@@ -213,12 +219,14 @@ void main() {
     // _send. Benign fields pass through. (P0 security parity)
     test('canary should_not_leak_flutter is scrubbed on the wire', () async {
       const canary = 'should_not_leak_flutter';
-      final sdk = AllStak.init(AllStakConfig(
-        apiKey: 'ask_test',
-        host: server.host,
-        environment: 'production',
-        release: 'flutter-canary-10outof10',
-      ));
+      final sdk = AllStak.init(
+        AllStakConfig(
+          apiKey: 'ask_test',
+          host: server.host,
+          environment: 'production',
+          release: 'flutter-canary-10outof10',
+        ),
+      );
 
       // SDK captureException takes a flat String map for context.
       // Nested-cycle sanitizer coverage is exercised in sanitizer_test.dart.
@@ -262,10 +270,9 @@ void main() {
     });
 
     test('breadcrumbs are attached to next captureException', () async {
-      final sdk = AllStak.init(AllStakConfig(
-        apiKey: 'ask_test',
-        host: server.host,
-      ));
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
 
       sdk.addBreadcrumb('http', 'GET /api/users');
       sdk.addBreadcrumb('ui', 'Button tapped', data: {'id': 'submit'});
@@ -283,10 +290,9 @@ void main() {
     });
 
     test('breadcrumbs are cleared after captureException', () async {
-      final sdk = AllStak.init(AllStakConfig(
-        apiKey: 'ask_test',
-        host: server.host,
-      ));
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
 
       sdk.addBreadcrumb('nav', 'page1');
       await sdk.captureException('first');
@@ -303,10 +309,9 @@ void main() {
     });
 
     test('breadcrumbs cap at 50', () {
-      final sdk = AllStak.init(const AllStakConfig(
-        apiKey: 'ask_test',
-        host: 'http://127.0.0.1:1',
-      ));
+      final sdk = AllStak.init(
+        const AllStakConfig(apiKey: 'ask_test', host: 'http://127.0.0.1:1'),
+      );
       for (var i = 0; i < 60; i++) {
         sdk.addBreadcrumb('test', 'crumb-$i');
       }
@@ -330,10 +335,9 @@ void main() {
     });
 
     test('flush waits for pending events to be delivered', () async {
-      final sdk = AllStak.init(AllStakConfig(
-        apiKey: 'ask_test',
-        host: server.host,
-      ));
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
 
       // Fire several events without awaiting individually.
       sdk.captureException('e1');
@@ -348,10 +352,9 @@ void main() {
     });
 
     test('flush is safe to call when no events are pending', () async {
-      final sdk = AllStak.init(AllStakConfig(
-        apiKey: 'ask_test',
-        host: server.host,
-      ));
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
       // Should complete without error.
       await sdk.flush();
       await sdk.flush();
@@ -359,11 +362,13 @@ void main() {
     });
 
     test('flush completes even when ingest host is unreachable', () async {
-      final sdk = AllStak.init(const AllStakConfig(
-        apiKey: 'ask_test',
-        host: 'http://127.0.0.1:1',
-        transportTimeout: Duration(milliseconds: 100),
-      ));
+      final sdk = AllStak.init(
+        const AllStakConfig(
+          apiKey: 'ask_test',
+          host: 'http://127.0.0.1:1',
+          transportTimeout: Duration(milliseconds: 100),
+        ),
+      );
 
       sdk.captureException('will-timeout');
       // flush should still complete (not hang) because _send swallows errors.
@@ -385,20 +390,18 @@ void main() {
     });
 
     test('httpClient returns a working Client wrapper', () {
-      final sdk = AllStak.init(AllStakConfig(
-        apiKey: 'ask_test',
-        host: server.host,
-      ));
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
       final client = sdk.httpClient();
       expect(client, isNotNull);
       client.close();
     });
 
     test('httpClient skips recording requests to own ingest host', () async {
-      final sdk = AllStak.init(AllStakConfig(
-        apiKey: 'ask_test',
-        host: server.host,
-      ));
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
       final client = sdk.httpClient();
 
       // Make a request to the SDK's own ingest host — should NOT be recorded.
@@ -410,9 +413,7 @@ void main() {
       // The only body should be from the GET itself arriving at our test
       // server, NOT a secondary ingest capture (which would cause recursion).
       // We verify no http-request ingest payload was sent.
-      final httpIngest = server.bodies.where(
-        (b) => b.containsKey('requests'),
-      );
+      final httpIngest = server.bodies.where((b) => b.containsKey('requests'));
       expect(httpIngest, isEmpty);
       client.close();
     });
@@ -432,11 +433,13 @@ void main() {
     });
 
     test('sends a message-level event', () async {
-      final sdk = AllStak.init(AllStakConfig(
-        apiKey: 'ask_test',
-        host: server.host,
-        environment: 'staging',
-      ));
+      final sdk = AllStak.init(
+        AllStakConfig(
+          apiKey: 'ask_test',
+          host: server.host,
+          environment: 'staging',
+        ),
+      );
 
       await sdk.captureMessage('deploy started', level: 'info');
       await sdk.flush();
@@ -464,10 +467,9 @@ void main() {
     });
 
     test('sends http-request payload', () async {
-      final sdk = AllStak.init(AllStakConfig(
-        apiKey: 'ask_test',
-        host: server.host,
-      ));
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
 
       await sdk.captureRequest(
         method: 'GET',

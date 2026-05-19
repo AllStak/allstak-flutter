@@ -15,7 +15,6 @@
 /// - Mobile-safe: synchronous, no I/O, no blocking calls.
 library;
 
-
 const String kRedacted = '[REDACTED]';
 
 const List<String> kDefaultDenylist = <String>[

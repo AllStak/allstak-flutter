@@ -18,8 +18,9 @@ AllStak? _instance;
 /// Thin wrapper so the MethodChannel name lives in one place and can be
 /// swapped for tests. Kept private to the library.
 class _NativeChannel {
-  static const MethodChannel channel =
-      MethodChannel('io.allstak.flutter/native');
+  static const MethodChannel channel = MethodChannel(
+    'io.allstak.flutter/native',
+  );
 }
 
 /// SDK identity sent on the wire as `sdk.name` / `sdk.version` in event metadata.
@@ -108,47 +109,50 @@ class AllStak {
   ) async {
     final sdk = init(config);
 
-    await runZonedGuarded<Future<void>>(() async {
-      // Bindings MUST be initialized inside the zone so framework callbacks
-      // run in the guarded zone, otherwise Flutter throws "Zone mismatch".
-      WidgetsFlutterBinding.ensureInitialized();
+    await runZonedGuarded<Future<void>>(
+      () async {
+        // Bindings MUST be initialized inside the zone so framework callbacks
+        // run in the guarded zone, otherwise Flutter throws "Zone mismatch".
+        WidgetsFlutterBinding.ensureInitialized();
 
-      final previousOnError = FlutterError.onError;
-      FlutterError.onError = (FlutterErrorDetails details) {
-        try {
-          sdk.captureException(
-            details.exceptionAsString(),
-            stackTrace: details.stack?.toString() ?? '',
-            context: {
-              'source': 'FlutterError.onError',
-              'library': details.library ?? 'flutter',
-            },
-          );
-        } catch (_) {}
-        previousOnError?.call(details);
-      };
+        final previousOnError = FlutterError.onError;
+        FlutterError.onError = (FlutterErrorDetails details) {
+          try {
+            sdk.captureException(
+              details.exceptionAsString(),
+              stackTrace: details.stack?.toString() ?? '',
+              context: {
+                'source': 'FlutterError.onError',
+                'library': details.library ?? 'flutter',
+              },
+            );
+          } catch (_) {}
+          previousOnError?.call(details);
+        };
 
-      PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
+        PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
+          try {
+            sdk.captureException(
+              error.toString(),
+              stackTrace: stack.toString(),
+              context: {'source': 'PlatformDispatcher.onError'},
+            );
+          } catch (_) {}
+          return false;
+        };
+
+        widgets.runApp(appBuilder());
+      },
+      (error, stack) {
         try {
           sdk.captureException(
             error.toString(),
             stackTrace: stack.toString(),
-            context: {'source': 'PlatformDispatcher.onError'},
+            context: {'source': 'runZonedGuarded'},
           );
         } catch (_) {}
-        return false;
-      };
-
-      widgets.runApp(appBuilder());
-    }, (error, stack) {
-      try {
-        sdk.captureException(
-          error.toString(),
-          stackTrace: stack.toString(),
-          context: {'source': 'runZonedGuarded'},
-        );
-      } catch (_) {}
-    });
+      },
+    );
   }
 
   void setUser({String? id, String? email}) {
@@ -172,10 +176,11 @@ class AllStak {
     final className = error is Error
         ? error.runtimeType.toString()
         : error is Exception
-            ? error.runtimeType.toString()
-            : 'DartError';
+        ? error.runtimeType.toString()
+        : 'DartError';
     final message = error is String ? error : error.toString();
-    final rawStack = stackTrace ??
+    final rawStack =
+        stackTrace ??
         (error is Error ? error.stackTrace?.toString() ?? '' : '');
     final stackLines = rawStack
         .split('\n')
@@ -231,7 +236,8 @@ class AllStak {
       final file = m.group(2) ?? '';
       final lineno = int.tryParse(m.group(3) ?? '') ?? 0;
       final colno = int.tryParse(m.group(4) ?? '');
-      final inApp = !file.startsWith('dart:') && !file.startsWith('package:flutter/');
+      final inApp =
+          !file.startsWith('dart:') && !file.startsWith('package:flutter/');
       out.add({
         'filename': file,
         'absPath': file,
@@ -332,12 +338,9 @@ class AllStak {
           'timestamp': DateTime.now().toUtc().toIso8601String(),
           'environment': config.environment,
           'release': config.release,
-          'metadata': {
-            ..._tags,
-            'requestId': effectiveRequestId,
-          },
-        }
-      ]
+          'metadata': {..._tags, 'requestId': effectiveRequestId},
+        },
+      ],
     });
   }
 
@@ -450,8 +453,9 @@ class AllStak {
           )
           .timeout(config.transportTimeout);
       if (config.debug) {
-        final trim =
-            res.body.length > 160 ? res.body.substring(0, 160) : res.body;
+        final trim = res.body.length > 160
+            ? res.body.substring(0, 160)
+            : res.body;
         // ignore: avoid_print
         print('[AllStak] POST $path -> ${res.statusCode} $trim');
       }
@@ -496,7 +500,10 @@ class _AllStakHttpClient extends http.BaseClient {
     final spanId = _allstak._hexId(8);
     final requestId = traceId;
     if (!isOwnIngest) {
-      request.headers.putIfAbsent('traceparent', () => '00-$traceId-$spanId-01');
+      request.headers.putIfAbsent(
+        'traceparent',
+        () => '00-$traceId-$spanId-01',
+      );
       request.headers.putIfAbsent('x-allstak-trace-id', () => traceId);
       request.headers.putIfAbsent('x-allstak-request-id', () => requestId);
     }
@@ -508,7 +515,8 @@ class _AllStakHttpClient extends http.BaseClient {
         // fire-and-forget — don't block the caller on ingest
         _allstak.captureRequest(
           method: request.method,
-          host: request.url.host +
+          host:
+              request.url.host +
               (request.url.hasPort ? ':${request.url.port}' : ''),
           path: request.url.path.isEmpty ? '/' : request.url.path,
           statusCode: resp.statusCode,
@@ -525,7 +533,8 @@ class _AllStakHttpClient extends http.BaseClient {
       if (!isOwnIngest) {
         _allstak.captureRequest(
           method: request.method,
-          host: request.url.host +
+          host:
+              request.url.host +
               (request.url.hasPort ? ':${request.url.port}' : ''),
           path: request.url.path.isEmpty ? '/' : request.url.path,
           statusCode: 0,
