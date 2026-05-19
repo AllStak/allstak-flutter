@@ -2,7 +2,7 @@ name: allstak_flutter
 description: "Experimental AllStak Flutter SDK preview. Not production-certified; runtime fail-open, source-map/symbolication, and dashboard proof are incomplete."
 version: 1.0.3
 homepage: https://app.allstak.sa
-repository: https://github.com/allstak-io/allstak-flutter
+repository: https://github.com/AllStak/allstak-flutter
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
