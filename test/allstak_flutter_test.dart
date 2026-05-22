@@ -8,12 +8,18 @@ import 'package:allstak_flutter/allstak_flutter.dart';
 class _IngestServer {
   late HttpServer _server;
   final List<Map<String, dynamic>> bodies = [];
+  final List<Map<String, String>> headers = [];
   late String host;
 
   Future<void> start() async {
     _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     host = 'http://127.0.0.1:${_server.port}';
     _server.listen((req) async {
+      final capturedHeaders = <String, String>{};
+      req.headers.forEach((key, values) {
+        capturedHeaders[key] = values.join(',');
+      });
+      headers.add(capturedHeaders);
       final raw = await utf8.decoder.bind(req).join();
       if (raw.isNotEmpty) {
         bodies.add(jsonDecode(raw) as Map<String, dynamic>);
@@ -417,6 +423,36 @@ void main() {
       expect(httpIngest, isEmpty);
       client.close();
     });
+
+    test('httpClient propagates trace headers and baggage', () async {
+      final upstream = _IngestServer();
+      await upstream.start();
+      final sdk = AllStak.init(AllStakConfig(
+        apiKey: 'ask_test',
+        host: server.host,
+      ));
+      final client = sdk.httpClient();
+
+      await client.get(
+        Uri.parse('${upstream.host}/orders'),
+        headers: {'baggage': 'vendor=value'},
+      );
+      await sdk.flush();
+
+      final sent = upstream.headers.single;
+      expect(sent['traceparent'], isNotNull);
+      expect(sent['x-allstak-trace-id'], isNotNull);
+      expect(sent['x-allstak-request-id'], isNotNull);
+      expect(sent['x-allstak-span-id'], isNotNull);
+      expect(sent['baggage'], contains('vendor=value'));
+      expect(sent['baggage'], contains('allstak-trace_id='));
+      expect(sent['baggage'], contains('allstak-request_id='));
+      expect(sent['baggage'], contains('allstak-span_id='));
+      expect(sent['allstak-baggage'], contains('allstak-trace_id='));
+
+      client.close();
+      await upstream.stop();
+    });
   });
 
   // ─── captureMessage ───────────────────────────────────────────────
@@ -477,6 +513,12 @@ void main() {
         path: '/users',
         statusCode: 200,
         durationMs: 42,
+        traceId: 'a' * 32,
+        requestId: 'req-123',
+        spanId: 'b' * 16,
+        parentSpanId: 'c' * 16,
+        requestSize: 12,
+        responseSize: 34,
       );
       await sdk.flush();
 
@@ -489,6 +531,13 @@ void main() {
       expect(reqs[0]['statusCode'], 200);
       expect(reqs[0]['durationMs'], 42);
       expect(reqs[0]['direction'], 'outbound');
+      expect(reqs[0]['traceId'], 'a' * 32);
+      expect(reqs[0]['requestId'], 'req-123');
+      expect(reqs[0]['spanId'], 'b' * 16);
+      expect(reqs[0]['parentSpanId'], 'c' * 16);
+      expect(reqs[0]['requestSize'], 12);
+      expect(reqs[0]['responseSize'], 34);
+      expect((reqs[0]['metadata'] as Map).containsKey('requestId'), isFalse);
     });
   });
 }

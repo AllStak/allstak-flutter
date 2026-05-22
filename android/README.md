@@ -1,19 +1,21 @@
-# allstak_flutter — Android native handler
+# allstak_flutter Android
 
-**Status: SCAFFOLDED, requires device/emulator verification.**
+Android native crash support is included with `allstak_flutter`.
 
-`src/main/kotlin/io/allstak/flutter/AllStakPlugin.kt` implements a standard
-Flutter `FlutterPlugin`. It:
+Most apps only need the Dart setup from the package root README:
 
-- Installs `Thread.setDefaultUncaughtExceptionHandler`.
-- Serialises the crash to `SharedPreferences` so it survives process death.
-- Exposes a `MethodChannel("io.allstak.flutter/native")` with `install(release)`
-  and `drainPendingCrash()` methods.
+```dart
+AllStak.runApp(
+  const AllStakConfig(apiKey: String.fromEnvironment('ALLSTAK_API_KEY')),
+  () => runApp(const MyApp()),
+);
+```
 
-To wire it up in the host Flutter app, add the AllStak plugin declaration
-to this package's `pubspec.yaml` (`flutter: plugin:` block). Dart side
-calls `AllStak.instance?.installNativeHandlers()` once at startup.
+After installing the package, rebuild the Android app so the native plugin is included:
 
-Verify on an Android emulator/device by forcing a JVM crash from a native
-callback (e.g. a `platform-side` channel method that `throw`s) and
-re-launching the app.
+```bash
+flutter clean
+flutter run --dart-define=ALLSTAK_API_KEY=ask_live_xxx
+```
+
+The native handler stores crash information across process restarts and sends it on the next launch.

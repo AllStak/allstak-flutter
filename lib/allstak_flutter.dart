@@ -4,6 +4,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show MethodChannel;
@@ -14,6 +15,23 @@ import 'package:http/http.dart' as http;
 import 'sanitizer.dart';
 
 AllStak? _instance;
+
+String _allstakBaggage(String traceId, String requestId, String? spanId) {
+  final parts = <String>['allstak-trace_id=$traceId'];
+  if (requestId.isNotEmpty) parts.add('allstak-request_id=$requestId');
+  if (spanId != null && spanId.isNotEmpty) parts.add('allstak-span_id=$spanId');
+  return parts.join(',');
+}
+
+String _mergeBaggage(String? existing, String traceId, String requestId, String? spanId) {
+  final preserved = (existing ?? '')
+      .split(',')
+      .map((part) => part.trim())
+      .where((part) => part.isNotEmpty && !part.toLowerCase().startsWith('allstak-'))
+      .toList();
+  preserved.addAll(_allstakBaggage(traceId, requestId, spanId).split(','));
+  return preserved.join(',');
+}
 
 /// Thin wrapper so the MethodChannel name lives in one place and can be
 /// swapped for tests. Kept private to the library.
@@ -81,6 +99,8 @@ class AllStak {
   final Map<String, String> _tags = {};
   String? _userId;
   String? _userEmail;
+  String? _traceId;
+  String? _currentSpanId;
   final List<Future<void>> _pendingRequests = [];
 
   AllStak._(this.config) {
@@ -166,6 +186,19 @@ class AllStak {
 
   void setTags(Map<String, String> tags) {
     _tags.addAll(tags);
+  }
+
+  String getTraceId() {
+    return _traceId ??= _hexId(16);
+  }
+
+  void setTraceId(String traceId) {
+    _traceId = traceId;
+  }
+
+  void resetTrace() {
+    _traceId = null;
+    _currentSpanId = null;
   }
 
   Future<void> captureException(
@@ -318,22 +351,29 @@ class AllStak {
     String? traceId,
     String? requestId,
     String? spanId,
+    String? parentSpanId,
+    String? errorFingerprint,
+    int requestSize = 0,
+    int responseSize = 0,
   }) async {
-    final effectiveTraceId = traceId ?? _hexId(16);
-    final effectiveRequestId = requestId ?? effectiveTraceId;
+    final effectiveTraceId = traceId ?? getTraceId();
+    final effectiveRequestId = requestId ?? _hexId(16);
     _sendBestEffort('/ingest/v1/http-requests', {
       'requests': [
         {
           'traceId': effectiveTraceId,
+          'requestId': effectiveRequestId,
           if (spanId != null) 'spanId': spanId,
+          if (parentSpanId != null) 'parentSpanId': parentSpanId,
           'direction': direction,
           'method': method,
           'host': host,
           'path': path,
           'statusCode': statusCode,
           'durationMs': durationMs,
-          'requestSize': 0,
-          'responseSize': 0,
+          'requestSize': requestSize,
+          'responseSize': responseSize,
+          if (errorFingerprint != null) 'errorFingerprint': errorFingerprint,
           'timestamp': DateTime.now().toUtc().toIso8601String(),
           'environment': config.environment,
           'release': config.release,
@@ -344,8 +384,9 @@ class AllStak {
   }
 
   String _hexId(int bytes) {
-    final raw = DateTime.now().microsecondsSinceEpoch.toRadixString(16);
-    return raw.padLeft(bytes * 2, '0').substring(0, bytes * 2);
+    final random = Random.secure();
+    final values = List<int>.generate(bytes, (_) => random.nextInt(256));
+    return values.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
   /// Installs platform-side uncaught exception handlers (Android Kotlin /
@@ -494,9 +535,10 @@ class _AllStakHttpClient extends http.BaseClient {
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
     final url = request.url.toString();
     final isOwnIngest = url.startsWith(_allstak.config.host);
-    final traceId = _allstak._hexId(16);
+    final traceId = _allstak.getTraceId();
     final spanId = _allstak._hexId(8);
-    final requestId = traceId;
+    final parentSpanId = _allstak._currentSpanId;
+    final requestId = _allstak._hexId(16);
     if (!isOwnIngest) {
       request.headers.putIfAbsent(
         'traceparent',
@@ -504,6 +546,9 @@ class _AllStakHttpClient extends http.BaseClient {
       );
       request.headers.putIfAbsent('x-allstak-trace-id', () => traceId);
       request.headers.putIfAbsent('x-allstak-request-id', () => requestId);
+      request.headers.putIfAbsent('x-allstak-span-id', () => spanId);
+      request.headers['baggage'] = _mergeBaggage(request.headers['baggage'], traceId, requestId, spanId);
+      request.headers['allstak-baggage'] = _allstakBaggage(traceId, requestId, spanId);
     }
     final sw = Stopwatch()..start();
     try {
@@ -522,6 +567,7 @@ class _AllStakHttpClient extends http.BaseClient {
           traceId: traceId,
           requestId: requestId,
           spanId: spanId,
+          parentSpanId: parentSpanId,
         );
       }
       return resp;
@@ -539,6 +585,8 @@ class _AllStakHttpClient extends http.BaseClient {
           traceId: traceId,
           requestId: requestId,
           spanId: spanId,
+          parentSpanId: parentSpanId,
+          errorFingerprint: e.runtimeType.toString(),
         );
       }
       rethrow;

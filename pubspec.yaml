@@ -1,5 +1,5 @@
 name: allstak_flutter
-description: "Experimental AllStak Flutter SDK preview. Not production-certified; runtime fail-open, source-map/symbolication, and dashboard proof are incomplete."
+description: "AllStak Flutter SDK for error tracking, request telemetry, breadcrumbs, sanitization, and mobile observability."
 version: 1.0.3
 homepage: https://app.allstak.sa
 repository: https://github.com/AllStak/allstak-flutter

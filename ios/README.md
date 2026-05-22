@@ -1,11 +1,21 @@
-# allstak_flutter — iOS native handler
+# allstak_flutter iOS
 
-**Status: SCAFFOLDED, requires iOS device/simulator verification.**
+iOS native crash support is included with `allstak_flutter`.
 
-`AllStakPlugin.swift` implements the iOS half: `NSSetUncaughtExceptionHandler`
-that stashes a DTO-compatible JSON payload in `NSUserDefaults`, then the
-same `io.allstak.flutter/native` MethodChannel exposes `install(release)`
-and `drainPendingCrash()` to Dart.
+Most apps only need the Dart setup from the package root README:
 
-To verify, build the containing example app with Flutter's iOS toolchain
-(`flutter build ios`), crash it from Obj-C (`@throw`), and re-launch.
+```dart
+AllStak.runApp(
+  const AllStakConfig(apiKey: String.fromEnvironment('ALLSTAK_API_KEY')),
+  () => runApp(const MyApp()),
+);
+```
+
+After installing the package, rebuild the iOS app so the native plugin is included:
+
+```bash
+flutter clean
+flutter run --dart-define=ALLSTAK_API_KEY=ask_live_xxx
+```
+
+The native handler stores crash information across process restarts and sends it on the next launch.
