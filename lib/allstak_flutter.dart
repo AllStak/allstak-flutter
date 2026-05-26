@@ -43,7 +43,7 @@ class _NativeChannel {
 
 /// SDK identity sent on the wire as `sdk.name` / `sdk.version` in event metadata.
 const String kAllStakSdkName = 'allstak-flutter';
-const String kAllStakSdkVersion = '1.2.0';
+const String kAllStakSdkVersion = '1.0.3';
 
 class AllStakConfig {
   final String apiKey;
@@ -487,7 +487,7 @@ class AllStak {
             headers: {
               'Content-Type': 'application/json',
               'X-AllStak-Key': config.apiKey,
-              'User-Agent': 'allstak-flutter/1.0.0',
+              'User-Agent': 'allstak-flutter/$kAllStakSdkVersion',
             },
             body: body,
           )
