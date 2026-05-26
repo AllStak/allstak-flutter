@@ -442,7 +442,7 @@ class AllStak {
           'timestamp': DateTime.now().toUtc().toIso8601String(),
           'environment': config.environment,
           'release': config.effectiveRelease,
-          'metadata': {..._tags, 'requestId': effectiveRequestId},
+          'metadata': Map<String, String>.from(_tags),
         },
       ],
     });
@@ -530,7 +530,7 @@ class AllStak {
     };
     // Scrub the full wire payload before serialization. One chokepoint
     // protects every telemetry type (errors, logs, http, native crashes).
-    // Pure (no mutation), mobile-safe (synchronous), fail-open.
+    // Pure (no mutation), mobile-safe (synchronous), fail-closed for this event.
     Map<String, dynamic> scrubbed;
     try {
       final out = scrub(merged);
@@ -540,9 +540,9 @@ class AllStak {
     } catch (sanErr) {
       if (config.debug) {
         // ignore: avoid_print
-        print('[AllStak] sanitizer failed; sending raw: $sanErr');
+        print('[AllStak] sanitizer failed; dropping event: $sanErr');
       }
-      scrubbed = merged;
+      return;
     }
     final body = jsonEncode(scrubbed);
     try {
