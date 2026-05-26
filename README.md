@@ -35,6 +35,34 @@ flutter run \
   --dart-define=ALLSTAK_RELEASE=myapp@1.0.0
 ```
 
+## Release identifier (automatic)
+
+You can omit `release` entirely and let the SDK resolve it. Order, highest first:
+
+1. **Explicit** `release:` you pass to `AllStakConfig` — always wins.
+2. **`ALLSTAK_RELEASE` dart-define** — `--dart-define=ALLSTAK_RELEASE=...`,
+   read at build time. This is the automatic mechanism.
+3. **SDK version** (`kAllStakSdkVersion`) as a last resort, so `release` is
+   never empty. (SDK version is *not* your app version — last resort only.)
+
+Set `autoDetectRelease: false` to opt out of steps 2–3 (only an explicit
+release is ever sent).
+
+**Honest note on mobile.** A shipped `.ipa`/`.apk`/web bundle has no `.git`
+directory and no `git` binary, so runtime git detection is impossible in
+production. Reading the app's *store* version at runtime would require a
+platform plugin (e.g. `package_info_plus`), which this SDK deliberately does
+**not** depend on to stay dependency-light. So the automatic mechanism is the
+build-time `ALLSTAK_RELEASE` dart-define. To get the real app version or a git
+SHA into events, pass it explicitly or via the dart-define, e.g.:
+
+```bash
+flutter build apk --dart-define=ALLSTAK_RELEASE=1.4.2+$(git rev-parse --short HEAD)
+```
+
+If your app already depends on `package_info_plus`, read the version there and
+pass it as `release:` (step 1) — the SDK won't add that dependency for you.
+
 ## HTTP client
 
 ```dart
@@ -70,7 +98,8 @@ MaterialApp(
 | `apiKey` | Project API key. |
 | `host` | Optional ingest host override for self-hosted AllStak. |
 | `environment` | Deployment environment. |
-| `release` | App version or commit SHA. |
+| `release` | App version or commit SHA. Omit to auto-detect (see "Release identifier"). |
+| `autoDetectRelease` | Default `true`. When `release` is empty, resolve from the `ALLSTAK_RELEASE` dart-define, then the SDK version. Set `false` to opt out. |
 | `service` | Logical app service name. |
 | `tags` | Tags added to telemetry. |
 | `transportTimeout` | Per-request timeout. |

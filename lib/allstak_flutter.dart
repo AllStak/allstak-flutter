@@ -45,6 +45,56 @@ class _NativeChannel {
 const String kAllStakSdkName = 'allstak-flutter';
 const String kAllStakSdkVersion = '1.0.3';
 
+/// Build-time release override. Set with `--dart-define=ALLSTAK_RELEASE=...`
+/// (or `--dart-define-from-file`). `String.fromEnvironment` is resolved by the
+/// Dart compiler at build time, so this is a compile-time constant — it is the
+/// dependency-light automatic release mechanism for Flutter (see
+/// [resolveAllStakRelease] and the README "Release identifier" section).
+const String _kAllStakReleaseDefine =
+    String.fromEnvironment('ALLSTAK_RELEASE');
+
+/// Resolves the effective `release` stamped on every event.
+///
+/// ## Honest scope note (mobile reality)
+/// A shipped Flutter app (`.ipa` / `.apk` / web bundle) contains no `.git`
+/// directory and no `git` binary, so true runtime git detection is impossible
+/// in production. Likewise, reading the app's store version at runtime requires
+/// a platform plugin (e.g. `package_info_plus`) — which this SDK deliberately
+/// does **not** depend on to stay dependency-light. The automatic, build-time
+/// release mechanism here is therefore the `ALLSTAK_RELEASE` **dart-define**,
+/// with the SDK version as a never-empty fallback.
+///
+/// Resolution order (highest priority first):
+/// 1. Explicit `release` passed to [AllStakConfig] — always wins.
+/// 2. `ALLSTAK_RELEASE` build-time dart-define.
+/// 3. (Automatic) the SDK version constant as a last resort, so `release` is
+///    never empty. (SDK version != app version — last resort only.) Apps that
+///    want the real app/store version should pass it explicitly (step 1) or
+///    via the dart-define (step 2), e.g. wired from `package_info_plus` in the
+///    host app or `1.4.2+$(git rev-parse --short HEAD)` in CI.
+///
+/// Steps 2–3 are gated by [autoDetect] (default `true` via
+/// `AllStakConfig.autoDetectRelease`). With auto-detection off, only an
+/// explicit release is used and the result may be empty.
+///
+/// [define] and [sdkVersion] are seams so tests can assert ordering without a
+/// real build environment.
+String resolveAllStakRelease({
+  required String explicit,
+  bool autoDetect = true,
+  String define = _kAllStakReleaseDefine,
+  String sdkVersion = kAllStakSdkVersion,
+}) {
+  // 1. Explicit always wins, regardless of autoDetect.
+  if (explicit.isNotEmpty) return explicit;
+  // Opt-out: respect the caller and send no release rather than inventing one.
+  if (!autoDetect) return '';
+  // 2. Build-time dart-define.
+  if (define.trim().isNotEmpty) return define;
+  // 3. Last resort so `release` is never empty.
+  return sdkVersion;
+}
+
 class AllStakConfig {
   final String apiKey;
   final String host;
@@ -62,6 +112,10 @@ class AllStakConfig {
   final String sdkName;
   final String sdkVersion;
   final Duration transportTimeout;
+  // When true (default) and no explicit `release` is given, the SDK resolves
+  // the release from the `ALLSTAK_RELEASE` dart-define, then the SDK version.
+  // See [resolveAllStakRelease]. Set false to opt out of all auto-detection.
+  final bool autoDetectRelease;
 
   const AllStakConfig({
     required this.apiKey,
@@ -78,7 +132,18 @@ class AllStakConfig {
     this.sdkName = kAllStakSdkName,
     this.sdkVersion = kAllStakSdkVersion,
     this.transportTimeout = const Duration(seconds: 2),
+    this.autoDetectRelease = true,
   });
+
+  /// The release actually stamped on events: explicit > ALLSTAK_RELEASE
+  /// dart-define > SDK version (gated by [autoDetectRelease]). Never returns a
+  /// non-empty surprise when auto-detection is off and no explicit release is
+  /// set — it returns `''` in that case.
+  String get effectiveRelease => resolveAllStakRelease(
+        explicit: release,
+        autoDetect: autoDetectRelease,
+        sdkVersion: sdkVersion,
+      );
 
   /// Release-tracking tags merged into every event payload's metadata so the
   /// dashboard can group / filter by SDK / platform / commit / branch.
@@ -234,7 +299,7 @@ class AllStak {
       // Backend expects `stackTrace: List<String>`, not a single `stacktrace` string.
       'stackTrace': stackLines,
       'environment': config.environment,
-      'release': config.release,
+      'release': config.effectiveRelease,
       'level': 'error',
       // Phase 3 — top-level v2 ingest fields.
       'sdkName': config.sdkName,
@@ -289,7 +354,7 @@ class AllStak {
       'exceptionClass': 'Message',
       'message': message,
       'environment': config.environment,
-      'release': config.release,
+      'release': config.effectiveRelease,
       'level': level,
       // Phase 3 — top-level v2 ingest fields.
       'sdkName': config.sdkName,
@@ -376,7 +441,7 @@ class AllStak {
           if (errorFingerprint != null) 'errorFingerprint': errorFingerprint,
           'timestamp': DateTime.now().toUtc().toIso8601String(),
           'environment': config.environment,
-          'release': config.release,
+          'release': config.effectiveRelease,
           'metadata': {..._tags, 'requestId': effectiveRequestId},
         },
       ],
@@ -400,7 +465,7 @@ class AllStak {
   Future<void> installNativeHandlers() async {
     try {
       const channel = _NativeChannel.channel;
-      await channel.invokeMethod('install', {'release': config.release});
+      await channel.invokeMethod('install', {'release': config.effectiveRelease});
       final Object? raw = await channel.invokeMethod('drainPendingCrash');
       if (raw is String && raw.isNotEmpty) {
         try {

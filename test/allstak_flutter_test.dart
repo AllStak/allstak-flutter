@@ -83,6 +83,89 @@ void main() {
     });
   });
 
+  // ─── Release resolution order ─────────────────────────────────────
+  // The dart-define and SDK-version inputs are injected as seams so we can
+  // assert ordering without rebuilding the test binary with --dart-define.
+  group('resolveAllStakRelease', () {
+    test('explicit release always wins, beating define and sdk version', () {
+      final r = resolveAllStakRelease(
+        explicit: '9.9.9',
+        autoDetect: true,
+        define: 'ci-deadbeef',
+        sdkVersion: '1.0.3',
+      );
+      expect(r, '9.9.9');
+    });
+
+    test('explicit wins even when autoDetect is off', () {
+      final r = resolveAllStakRelease(
+        explicit: '9.9.9',
+        autoDetect: false,
+        define: 'ci-deadbeef',
+        sdkVersion: '1.0.3',
+      );
+      expect(r, '9.9.9');
+    });
+
+    test('dart-define is used when no explicit release', () {
+      final r = resolveAllStakRelease(
+        explicit: '',
+        autoDetect: true,
+        define: '1.4.2+abc123',
+        sdkVersion: '1.0.3',
+      );
+      expect(r, '1.4.2+abc123');
+    });
+
+    test('falls back to sdk version when no explicit and no define', () {
+      final r = resolveAllStakRelease(
+        explicit: '',
+        autoDetect: true,
+        define: '',
+        sdkVersion: '1.0.3',
+      );
+      expect(r, '1.0.3', reason: 'release must never be empty as a last resort');
+    });
+
+    test('blank dart-define is ignored and falls through to sdk version', () {
+      final r = resolveAllStakRelease(
+        explicit: '',
+        autoDetect: true,
+        define: '   ',
+        sdkVersion: '1.0.3',
+      );
+      expect(r, '1.0.3');
+    });
+
+    test('autoDetect off with no explicit yields empty (opt-out)', () {
+      final r = resolveAllStakRelease(
+        explicit: '',
+        autoDetect: false,
+        define: 'ci-x',
+        sdkVersion: '1.0.3',
+      );
+      expect(r, '', reason: 'opt-out must suppress all automatic sources');
+    });
+  });
+
+  group('AllStakConfig.effectiveRelease', () {
+    test('explicit release flows through', () {
+      const config = AllStakConfig(apiKey: 'ask_test', release: 'v2.0.0');
+      expect(config.effectiveRelease, 'v2.0.0');
+    });
+
+    test('defaults to sdk version when nothing set (auto-detect on)', () {
+      const config = AllStakConfig(apiKey: 'ask_test');
+      // No explicit release, no dart-define in the test binary -> SDK version.
+      expect(config.effectiveRelease, kAllStakSdkVersion);
+    });
+
+    test('auto-detect off with no explicit release yields empty', () {
+      const config = AllStakConfig(apiKey: 'ask_test', autoDetectRelease: false);
+      expect(config.effectiveRelease, '');
+    });
+  });
+
   // ─── Init / singleton tests ───────────────────────────────────────
   group('AllStak.init', () {
     test('sets singleton instance', () {
