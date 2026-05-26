@@ -116,6 +116,7 @@ class AllStakConfig {
   // the release from the `ALLSTAK_RELEASE` dart-define, then the SDK version.
   // See [resolveAllStakRelease]. Set false to opt out of all auto-detection.
   final bool autoDetectRelease;
+  final bool autoRegisterRelease;
 
   const AllStakConfig({
     required this.apiKey,
@@ -133,6 +134,7 @@ class AllStakConfig {
     this.sdkVersion = kAllStakSdkVersion,
     this.transportTimeout = const Duration(seconds: 2),
     this.autoDetectRelease = true,
+    this.autoRegisterRelease = true,
   });
 
   /// The release actually stamped on events: explicit > ALLSTAK_RELEASE
@@ -177,6 +179,7 @@ class AllStak {
     if (!_tags.containsKey('platform')) {
       _tags['platform'] = 'flutter';
     }
+    _registerRuntimeRelease();
   }
 
   static AllStak init(AllStakConfig config) {
@@ -186,6 +189,25 @@ class AllStak {
   }
 
   static AllStak? get instance => _instance;
+
+  void _registerRuntimeRelease() {
+    final release = config.effectiveRelease;
+    if (!config.autoRegisterRelease || config.apiKey.isEmpty || release.isEmpty) {
+      return;
+    }
+    final ingestHost = Uri.tryParse(config.host)?.host;
+    if (ingestHost == '127.0.0.1' || ingestHost == 'localhost') {
+      return;
+    }
+    _sendBestEffort('/ingest/v1/releases', {
+      'version': release,
+      'environment': config.environment,
+      'commitSha': config.commitSha.isNotEmpty ? config.commitSha : null,
+      'branch': config.branch.isNotEmpty ? config.branch : null,
+      'author': null,
+      'message': null,
+    });
+  }
 
   /// Install Flutter/Dart error handlers and run the app inside a guarded zone.
   static Future<void> runApp(
