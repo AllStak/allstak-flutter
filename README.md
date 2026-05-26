@@ -96,7 +96,6 @@ MaterialApp(
 | Option | Description |
 | --- | --- |
 | `apiKey` | Project API key. |
-| `host` | Optional ingest host override for self-hosted AllStak. |
 | `environment` | Deployment environment. |
 | `release` | App version or commit SHA. Omit to auto-detect (see "Release identifier"). |
 | `autoDetectRelease` | Default `true`. When `release` is empty, resolve from the `ALLSTAK_RELEASE` dart-define, then the SDK version. Set `false` to opt out. |
