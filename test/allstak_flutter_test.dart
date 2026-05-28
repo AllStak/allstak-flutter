@@ -124,7 +124,8 @@ void main() {
         define: '',
         sdkVersion: '1.0.3',
       );
-      expect(r, '1.0.3', reason: 'release must never be empty as a last resort');
+      expect(r, '1.0.3',
+          reason: 'release must never be empty as a last resort');
     });
 
     test('blank dart-define is ignored and falls through to sdk version', () {
@@ -161,7 +162,8 @@ void main() {
     });
 
     test('auto-detect off with no explicit release yields empty', () {
-      const config = AllStakConfig(apiKey: 'ask_test', autoDetectRelease: false);
+      const config =
+          AllStakConfig(apiKey: 'ask_test', autoDetectRelease: false);
       expect(config.effectiveRelease, '');
     });
   });
@@ -569,6 +571,237 @@ void main() {
       expect(body['message'], 'deploy started');
       expect(body['level'], 'info');
       expect(body['environment'], 'staging');
+    });
+  });
+
+  // ─── SessionStatus model (mirrors the Java SessionTracker) ────────
+  group('Session model', () {
+    test('starts ok, escalates ok -> errored -> crashed', () {
+      final s = Session();
+      expect(s.status, SessionStatus.ok);
+      expect(s.errorCount, 0);
+
+      s.recordError();
+      expect(s.status, SessionStatus.errored);
+      expect(s.errorCount, 1);
+
+      // A second handled error keeps ERRORED and bumps the counter.
+      s.recordError();
+      expect(s.status, SessionStatus.errored);
+      expect(s.errorCount, 2);
+
+      // Crash escalates and is terminal.
+      s.recordCrash();
+      expect(s.status, SessionStatus.crashed);
+      expect(s.errorCount, 3);
+    });
+
+    test('recordError does not downgrade a crashed session', () {
+      final s = Session();
+      s.recordCrash();
+      expect(s.status, SessionStatus.crashed);
+      // Once crashed, a later handled error must not pull it back to errored.
+      s.recordError();
+      expect(s.status, SessionStatus.crashed);
+    });
+
+    test('durationMs is non-negative', () {
+      final s = Session(startedAt: DateTime.now());
+      expect(s.durationMs(), greaterThanOrEqualTo(0));
+    });
+
+    test('wire values match the backend contract', () {
+      expect(SessionStatus.ok.wire, 'ok');
+      expect(SessionStatus.errored.wire, 'errored');
+      expect(SessionStatus.crashed.wire, 'crashed');
+      expect(SessionStatus.abnormal.wire, 'abnormal');
+    });
+  });
+
+  // ─── Release-health session lifecycle (start/end on the wire) ─────
+  // `forceSessionTracking: true` bypasses the `flutter test` runtime guard so
+  // the lifecycle can be asserted; production callers never set it.
+  group('session tracking', () {
+    late _IngestServer server;
+
+    setUp(() async {
+      server = _IngestServer();
+      await server.start();
+    });
+
+    tearDown(() async {
+      await server.stop();
+    });
+
+    Map<String, dynamic>? sessionStart(_IngestServer s) {
+      final matches = s.bodies
+          .where((b) => b.containsKey('sessionId') && b.containsKey('release'))
+          .toList();
+      return matches.isEmpty ? null : matches.first;
+    }
+
+    test('posts /sessions/start on init with the expected payload shape',
+        () async {
+      final sdk = AllStak.init(
+        AllStakConfig(
+          apiKey: 'ask_test',
+          host: server.host,
+          environment: 'staging',
+          release: 'v1.2.3',
+        ),
+        forceSessionTracking: true,
+      );
+      await sdk.flush();
+
+      final start = sessionStart(server);
+      expect(start, isNotNull, reason: 'session/start must be posted on init');
+      expect(start!['sessionId'], isA<String>());
+      expect((start['sessionId'] as String).isNotEmpty, isTrue);
+      expect(start['release'], 'v1.2.3');
+      expect(start['environment'], 'staging');
+      expect(start['sdkName'], 'allstak-flutter');
+      expect(start['sdkVersion'], kAllStakSdkVersion);
+      expect(start['platform'], 'flutter');
+      // No user set at init -> userId omitted.
+      expect(start.containsKey('userId'), isFalse);
+      // sessionId is exposed for attaching to events.
+      expect(sdk.sessionId, start['sessionId']);
+    });
+
+    test('release falls back to sdk version when none is resolved', () async {
+      final sdk = AllStak.init(
+        AllStakConfig(
+          apiKey: 'ask_test',
+          host: server.host,
+          autoDetectRelease: false, // effectiveRelease == ''
+        ),
+        forceSessionTracking: true,
+      );
+      await sdk.flush();
+
+      final start = sessionStart(server);
+      expect(start, isNotNull);
+      expect(start!['release'], kAllStakSdkVersion,
+          reason: 'a session must never be dropped for lack of a release');
+    });
+
+    test('attaches sessionId to error payloads', () async {
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+        forceSessionTracking: true,
+      );
+      final sid = sdk.sessionId;
+      expect(sid, isNotNull);
+
+      await sdk.captureException('boom');
+      await sdk.flush();
+
+      final err = server.bodies.firstWhere(
+        (b) => b['exceptionClass'] == 'DartError',
+      );
+      expect(err['sessionId'], sid);
+    });
+
+    test('end posts /sessions/end with status ok and a non-negative durationMs',
+        () async {
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host, release: 'r1'),
+        forceSessionTracking: true,
+      );
+      final sid = sdk.sessionId;
+      sdk.endSession();
+      await sdk.flush();
+
+      final end = server.bodies.firstWhere((b) => b.containsKey('status'));
+      expect(end['sessionId'], sid);
+      expect(end['status'], 'ok');
+      expect(end['durationMs'], isA<int>());
+      expect(end['durationMs'] as int, greaterThanOrEqualTo(0));
+    });
+
+    test('status transitions ok -> errored after a handled error', () async {
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host, release: 'r1'),
+        forceSessionTracking: true,
+      );
+      await sdk.captureException('handled');
+      sdk.endSession();
+      await sdk.flush();
+
+      final end = server.bodies.firstWhere((b) => b.containsKey('status'));
+      expect(end['status'], 'errored');
+    });
+
+    test('status transitions to crashed on a fatal error', () async {
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host, release: 'r1'),
+        forceSessionTracking: true,
+      );
+      // Mirror the unhandled-handler path.
+      await sdk.captureException('handled-first');
+      await sdk.captureException('fatal-crash', fatal: true);
+      sdk.endSession();
+      await sdk.flush();
+
+      final end = server.bodies.firstWhere((b) => b.containsKey('status'));
+      expect(end['status'], 'crashed',
+          reason: 'a fatal error must escalate the session to crashed');
+    });
+
+    test('end is idempotent — a second endSession sends nothing new', () async {
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host, release: 'r1'),
+        forceSessionTracking: true,
+      );
+      sdk.endSession();
+      await sdk.flush();
+      final endsAfterFirst =
+          server.bodies.where((b) => b.containsKey('status')).length;
+
+      sdk.endSession();
+      await sdk.flush();
+      final endsAfterSecond =
+          server.bodies.where((b) => b.containsKey('status')).length;
+
+      expect(endsAfterFirst, 1);
+      expect(endsAfterSecond, 1);
+    });
+
+    test('enableAutoSessionTracking=false opts out (no session/start)',
+        () async {
+      final sdk = AllStak.init(
+        AllStakConfig(
+          apiKey: 'ask_test',
+          host: server.host,
+          release: 'r1',
+          enableAutoSessionTracking: false,
+        ),
+        forceSessionTracking: true, // even forced, the flag wins
+      );
+      await sdk.flush();
+
+      expect(sdk.sessionId, isNull);
+      expect(sessionStart(server), isNull,
+          reason: 'opt-out must suppress the session/start POST');
+
+      // captureException still works and carries no sessionId.
+      await sdk.captureException('no-session');
+      await sdk.flush();
+      final err = server.bodies.firstWhere(
+        (b) => b['exceptionClass'] == 'DartError',
+      );
+      expect(err.containsKey('sessionId'), isFalse);
+    });
+
+    test('skipped under the flutter test runtime without the force seam',
+        () async {
+      // No forceSessionTracking -> the FLUTTER_TEST guard suppresses tracking.
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host, release: 'r1'),
+      );
+      await sdk.flush();
+      expect(sdk.sessionId, isNull);
+      expect(sessionStart(server), isNull);
     });
   });
 

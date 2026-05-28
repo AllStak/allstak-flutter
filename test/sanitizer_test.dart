@@ -79,6 +79,27 @@ void main() {
       expect(out['custom_pii'], kRedacted);
     });
 
+    test('preserves AllStak sessionId correlation id (allowlist)', () {
+      // The release-health sessionId must survive scrubbing so the backend
+      // can mark the session errored/crashed. Exact camelCase match only.
+      final out =
+          scrub({'sessionId': 'ad72fed7c91318c49621a0e3a7201a64'}) as Map;
+      expect(out['sessionId'], 'ad72fed7c91318c49621a0e3a7201a64');
+    });
+
+    test('lowercase sessionid / session_id are still redacted', () {
+      // The allowlist is exact + case-sensitive, so denylisted lookalike keys
+      // a host app might supply are still scrubbed.
+      final out = scrub({
+        'sessionid': 'leaky',
+        'session_id': 'leaky',
+        'session_token': 'leaky',
+      }) as Map;
+      expect(out['sessionid'], kRedacted);
+      expect(out['session_id'], kRedacted);
+      expect(out['session_token'], kRedacted);
+    });
+
     test('primitive passthrough', () {
       expect(scrub(42), 42);
       expect(scrub('x'), 'x');

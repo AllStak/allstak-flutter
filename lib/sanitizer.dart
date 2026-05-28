@@ -17,6 +17,19 @@ library;
 
 const String kRedacted = '[REDACTED]';
 
+/// Exact (case-sensitive) AllStak wire field names that are non-secret
+/// correlation identifiers and must survive scrubbing. The release-health
+/// `sessionId` is the canonical example: the backend's error consumer keys
+/// off it to mark a session errored/crashed, so it MUST reach the wire raw.
+///
+/// This is intentionally an *exact, case-sensitive* match on AllStak's own
+/// camelCase field names — it does not loosen the substring denylist for
+/// arbitrary user-supplied keys. A user field literally named `sessionid`,
+/// `session_id`, or `session_token` is still redacted by the denylist.
+const Set<String> kCorrelationAllowlist = <String>{
+  'sessionId',
+};
+
 const List<String> kDefaultDenylist = <String>[
   'authorization',
   'proxy-authorization',
@@ -76,7 +89,11 @@ Object? _walk(Object? value, List<String> denylist, Set<int> seen) {
     final out = <String, Object?>{};
     value.forEach((k, v) {
       final key = k.toString();
-      if (_isSensitive(key, denylist)) {
+      // Exact-match allowlist wins: non-secret AllStak correlation ids
+      // (e.g. sessionId) must reach the wire raw for server-side correlation.
+      if (kCorrelationAllowlist.contains(key)) {
+        out[key] = _walk(v, denylist, seen);
+      } else if (_isSensitive(key, denylist)) {
         out[key] = kRedacted;
       } else {
         out[key] = _walk(v, denylist, seen);

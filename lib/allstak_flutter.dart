@@ -13,6 +13,9 @@ import 'package:flutter/widgets.dart' as widgets show runApp;
 import 'package:http/http.dart' as http;
 
 import 'sanitizer.dart';
+import 'src/session.dart';
+
+export 'src/session.dart' show Session, SessionStatus;
 
 AllStak? _instance;
 
@@ -23,11 +26,13 @@ String _allstakBaggage(String traceId, String requestId, String? spanId) {
   return parts.join(',');
 }
 
-String _mergeBaggage(String? existing, String traceId, String requestId, String? spanId) {
+String _mergeBaggage(
+    String? existing, String traceId, String requestId, String? spanId) {
   final preserved = (existing ?? '')
       .split(',')
       .map((part) => part.trim())
-      .where((part) => part.isNotEmpty && !part.toLowerCase().startsWith('allstak-'))
+      .where((part) =>
+          part.isNotEmpty && !part.toLowerCase().startsWith('allstak-'))
       .toList();
   preserved.addAll(_allstakBaggage(traceId, requestId, spanId).split(','));
   return preserved.join(',');
@@ -50,8 +55,7 @@ const String kAllStakSdkVersion = '1.0.3';
 /// Dart compiler at build time, so this is a compile-time constant — it is the
 /// dependency-light automatic release mechanism for Flutter (see
 /// [resolveAllStakRelease] and the README "Release identifier" section).
-const String _kAllStakReleaseDefine =
-    String.fromEnvironment('ALLSTAK_RELEASE');
+const String _kAllStakReleaseDefine = String.fromEnvironment('ALLSTAK_RELEASE');
 
 /// Resolves the effective `release` stamped on every event.
 ///
@@ -117,6 +121,11 @@ class AllStakConfig {
   // See [resolveAllStakRelease]. Set false to opt out of all auto-detection.
   final bool autoDetectRelease;
   final bool autoRegisterRelease;
+  // When true (default) the SDK opens a release-health session on init
+  // (POST /ingest/v1/sessions/start) and closes it on graceful shutdown
+  // (POST /ingest/v1/sessions/end). Sessions are never sampled. Set false to
+  // opt out entirely. Automatically skipped under the `flutter test` runtime.
+  final bool enableAutoSessionTracking;
 
   const AllStakConfig({
     required this.apiKey,
@@ -135,6 +144,7 @@ class AllStakConfig {
     this.transportTimeout = const Duration(seconds: 2),
     this.autoDetectRelease = true,
     this.autoRegisterRelease = true,
+    this.enableAutoSessionTracking = true,
   });
 
   /// The release actually stamped on events: explicit > ALLSTAK_RELEASE
@@ -170,7 +180,12 @@ class AllStak {
   String? _currentSpanId;
   final List<Future<void>> _pendingRequests = [];
 
-  AllStak._(this.config) {
+  /// Release-health session tracker. Null when auto session tracking is
+  /// disabled or skipped under the test runtime. See [SessionTracker].
+  SessionTracker? _sessionTracker;
+  _SessionLifecycleObserver? _sessionObserver;
+
+  AllStak._(this.config, {bool forceSessionTracking = false}) {
     _tags.addAll(config.tags);
     // Release-tracking metadata is stamped onto _tags once at init so every
     // outgoing event payload (errors, logs, http, db) picks it up via the
@@ -180,19 +195,97 @@ class AllStak {
       _tags['platform'] = 'flutter';
     }
     _registerRuntimeRelease();
+    _startSessionTracking(force: forceSessionTracking);
   }
 
-  static AllStak init(AllStakConfig config) {
-    final sdk = AllStak._(config);
+  /// [forceSessionTracking] is a test-only seam: it bypasses the
+  /// `flutter test` runtime guard so the session lifecycle can be asserted in
+  /// unit tests. Production callers never set it.
+  static AllStak init(AllStakConfig config,
+      {bool forceSessionTracking = false}) {
+    final sdk = AllStak._(config, forceSessionTracking: forceSessionTracking);
     _instance = sdk;
     return sdk;
   }
 
   static AllStak? get instance => _instance;
 
+  /// True when running under `flutter test` (which sets `FLUTTER_TEST=true`).
+  /// Mirrors the Java SDK's `isLikelyTestRuntime` classpath guard so unit
+  /// tests don't open real release-health sessions. Fail-open: any error
+  /// resolving the environment treats the runtime as non-test.
+  static bool _isLikelyTestRuntime() {
+    try {
+      if (kIsWeb) return false;
+      final v = Platform.environment['FLUTTER_TEST'];
+      return v == 'true' || v == '1';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _startSessionTracking({bool force = false}) {
+    if (!config.enableAutoSessionTracking) return;
+    if (!force && _isLikelyTestRuntime()) return;
+    if (config.apiKey.isEmpty) return;
+    try {
+      final tracker = SessionTracker(
+        send: _sendBestEffort,
+        release: config.effectiveRelease,
+        environment: config.environment,
+        sdkName: config.sdkName,
+        sdkVersion: config.sdkVersion,
+        platform: config.platform,
+      );
+      tracker.start(userId: _userId);
+      _sessionTracker = tracker;
+      // End the session on graceful shutdown (app background -> terminate).
+      try {
+        final observer = _SessionLifecycleObserver(this);
+        WidgetsBinding.instance.addObserver(observer);
+        _sessionObserver = observer;
+      } catch (_) {
+        // WidgetsBinding may be unavailable (pure-Dart / not yet initialized).
+        // The session still ends via an explicit close()/endSession() call.
+      }
+    } catch (_) {
+      // Fail-open: session tracking must never break init.
+    }
+  }
+
+  /// The active release-health session id, or null when no session is open.
+  /// Attached to every captured error/event payload so the backend's error
+  /// consumer can mark the session errored/crashed server-side.
+  String? get sessionId => _sessionTracker?.currentSessionId;
+
+  /// Gracefully end the active release-health session, POSTing
+  /// `/ingest/v1/sessions/end` with the accumulated status + duration.
+  /// Idempotent and fail-open. Called automatically on app
+  /// background -> terminate; also safe to call from app teardown.
+  void endSession({SessionStatus? status}) {
+    try {
+      _sessionTracker?.end(finalStatus: status);
+    } catch (_) {}
+  }
+
+  /// Flush pending telemetry and end the release-health session. Best-effort.
+  Future<void> close() async {
+    endSession();
+    try {
+      final observer = _sessionObserver;
+      if (observer != null) {
+        WidgetsBinding.instance.removeObserver(observer);
+        _sessionObserver = null;
+      }
+    } catch (_) {}
+    await flush();
+  }
+
   void _registerRuntimeRelease() {
     final release = config.effectiveRelease;
-    if (!config.autoRegisterRelease || config.apiKey.isEmpty || release.isEmpty) {
+    if (!config.autoRegisterRelease ||
+        config.apiKey.isEmpty ||
+        release.isEmpty) {
       return;
     }
     final ingestHost = Uri.tryParse(config.host)?.host;
@@ -225,6 +318,7 @@ class AllStak {
         final previousOnError = FlutterError.onError;
         FlutterError.onError = (FlutterErrorDetails details) {
           try {
+            // Unhandled framework error -> release-health CRASHED.
             sdk.captureException(
               details.exceptionAsString(),
               stackTrace: details.stack?.toString() ?? '',
@@ -232,6 +326,7 @@ class AllStak {
                 'source': 'FlutterError.onError',
                 'library': details.library ?? 'flutter',
               },
+              fatal: true,
             );
           } catch (_) {}
           previousOnError?.call(details);
@@ -239,10 +334,12 @@ class AllStak {
 
         PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
           try {
+            // Unhandled platform error -> release-health CRASHED.
             sdk.captureException(
               error.toString(),
               stackTrace: stack.toString(),
               context: {'source': 'PlatformDispatcher.onError'},
+              fatal: true,
             );
           } catch (_) {}
           return false;
@@ -252,10 +349,12 @@ class AllStak {
       },
       (error, stack) {
         try {
+          // Uncaught zone error -> release-health CRASHED.
           sdk.captureException(
             error.toString(),
             stackTrace: stack.toString(),
             context: {'source': 'runZonedGuarded'},
+            fatal: true,
           );
         } catch (_) {}
       },
@@ -292,6 +391,7 @@ class AllStak {
     Object error, {
     String? stackTrace,
     Map<String, String>? context,
+    bool fatal = false,
   }) async {
     final className = error is Error
         ? error.runtimeType.toString()
@@ -315,6 +415,10 @@ class AllStak {
     // them as e.g. `#0  MyClass.method (package:foo/foo.dart:42:5)` —
     // parse into the v2 ErrorIngestRequest.Frame shape.
     final structured = _parseDartFrames(stackLines);
+    // Release-health: attach the active session id so the backend's error
+    // consumer can mark this session errored/crashed server-side. Null when
+    // auto session tracking is disabled or no session is open.
+    final sid = _sessionTracker?.currentSessionId;
     _sendBestEffort('/ingest/v1/errors', {
       'exceptionClass': className,
       'message': message,
@@ -322,12 +426,13 @@ class AllStak {
       'stackTrace': stackLines,
       'environment': config.environment,
       'release': config.effectiveRelease,
-      'level': 'error',
+      'level': fatal ? 'fatal' : 'error',
       // Phase 3 — top-level v2 ingest fields.
       'sdkName': config.sdkName,
       'sdkVersion': config.sdkVersion,
       'platform': config.platform,
       if (config.dist.isNotEmpty) 'dist': config.dist,
+      if (sid != null) 'sessionId': sid,
       if (structured.isNotEmpty) 'frames': structured,
       'user': {
         if (_userId != null) 'id': _userId,
@@ -336,6 +441,13 @@ class AllStak {
       'metadata': {..._tags, if (context != null) ...context},
       if (crumbs != null) 'breadcrumbs': crumbs,
     });
+    // Release-health: bump the local session status. A fatal (unhandled /
+    // crash) escalates to CRASHED; a handled error -> ERRORED.
+    if (fatal) {
+      _sessionTracker?.recordCrash();
+    } else {
+      _sessionTracker?.recordError();
+    }
   }
 
   /// Phase 3 — parse Dart stack-trace lines into v2 Frame[] dicts.
@@ -372,6 +484,7 @@ class AllStak {
   }
 
   Future<void> captureMessage(String message, {String level = 'info'}) async {
+    final sid = _sessionTracker?.currentSessionId;
     _sendBestEffort('/ingest/v1/errors', {
       'exceptionClass': 'Message',
       'message': message,
@@ -383,6 +496,7 @@ class AllStak {
       'sdkVersion': config.sdkVersion,
       'platform': config.platform,
       if (config.dist.isNotEmpty) 'dist': config.dist,
+      if (sid != null) 'sessionId': sid,
       'user': {
         if (_userId != null) 'id': _userId,
         if (_userEmail != null) 'email': _userEmail,
@@ -487,7 +601,8 @@ class AllStak {
   Future<void> installNativeHandlers() async {
     try {
       const channel = _NativeChannel.channel;
-      await channel.invokeMethod('install', {'release': config.effectiveRelease});
+      await channel
+          .invokeMethod('install', {'release': config.effectiveRelease});
       final Object? raw = await channel.invokeMethod('drainPendingCrash');
       if (raw is String && raw.isNotEmpty) {
         try {
@@ -634,8 +749,10 @@ class _AllStakHttpClient extends http.BaseClient {
       request.headers.putIfAbsent('x-allstak-trace-id', () => traceId);
       request.headers.putIfAbsent('x-allstak-request-id', () => requestId);
       request.headers.putIfAbsent('x-allstak-span-id', () => spanId);
-      request.headers['baggage'] = _mergeBaggage(request.headers['baggage'], traceId, requestId, spanId);
-      request.headers['allstak-baggage'] = _allstakBaggage(traceId, requestId, spanId);
+      request.headers['baggage'] =
+          _mergeBaggage(request.headers['baggage'], traceId, requestId, spanId);
+      request.headers['allstak-baggage'] =
+          _allstakBaggage(traceId, requestId, spanId);
     }
     final sw = Stopwatch()..start();
     try {
@@ -684,5 +801,22 @@ class _AllStakHttpClient extends http.BaseClient {
   void close() {
     _inner.close();
     super.close();
+  }
+}
+
+/// Ends the release-health session on graceful shutdown — i.e. when the app
+/// transitions to `detached` (process about to terminate). Best-effort and
+/// fail-open; never blocks the lifecycle callback.
+class _SessionLifecycleObserver extends WidgetsBindingObserver {
+  _SessionLifecycleObserver(this._allstak);
+  final AllStak _allstak;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached) {
+      // The process is terminating — close the session with its accumulated
+      // status (ok / errored / crashed).
+      _allstak.endSession();
+    }
   }
 }
