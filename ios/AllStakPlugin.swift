@@ -65,6 +65,14 @@ public class AllStakPlugin: NSObject, FlutterPlugin {
       UserDefaults.standard.removeObject(forKey: kPendingCrashKey)
       UserDefaults.standard.synchronize()
       result(json as Any?)
+    case "spoolDir":
+      // Persistent, sandboxed directory for the offline telemetry spool.
+      // Application Support is the conventional home for app-managed,
+      // non-user-facing data that should survive app restarts.
+      let dir = NSSearchPathForDirectoriesInDomains(
+        .applicationSupportDirectory, .userDomainMask, true
+      ).first
+      result(dir as Any?)
     default:
       result(FlutterMethodNotImplemented)
     }

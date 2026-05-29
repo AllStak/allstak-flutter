@@ -13,8 +13,10 @@ import 'package:flutter/widgets.dart' as widgets show runApp;
 import 'package:http/http.dart' as http;
 
 import 'sanitizer.dart';
+import 'src/offline_queue.dart';
 import 'src/session.dart';
 
+export 'src/offline_queue.dart' show OfflineQueue, OfflineEntry;
 export 'src/session.dart' show Session, SessionStatus;
 
 AllStak? _instance;
@@ -36,6 +38,20 @@ String _mergeBaggage(
       .toList();
   preserved.addAll(_allstakBaggage(traceId, requestId, spanId).split(','));
   return preserved.join(',');
+}
+
+/// Classifies the result of a single transport POST so the offline queue knows
+/// whether to retain an entry for a later retry.
+enum _DeliveryOutcome {
+  /// 2xx — accepted by the backend; the entry can be discarded.
+  delivered,
+
+  /// Network error / timeout / 429 / 5xx — transient; retain for retry.
+  retryable,
+
+  /// Non-429 4xx — permanently undeliverable (bad request, auth); discard so
+  /// the spool never loops on a poison entry.
+  permanent,
 }
 
 /// Thin wrapper so the MethodChannel name lives in one place and can be
@@ -126,6 +142,15 @@ class AllStakConfig {
   // (POST /ingest/v1/sessions/end). Sessions are never sampled. Set false to
   // opt out entirely. Automatically skipped under the `flutter test` runtime.
   final bool enableAutoSessionTracking;
+  // When true (default) telemetry that cannot be delivered (network error,
+  // timeout, app shutting down with events pending) is persisted to a bounded,
+  // PII-scrubbed file spool and re-sent on the next SDK init — so events
+  // survive an app restart AND a network outage. Session lifecycle calls
+  // (/sessions/start, /sessions/end) are NEVER persisted (a replayed stale
+  // session would skew release-health durations). Set false to keep the legacy
+  // in-memory fire-and-forget behavior. Degrades silently to in-memory when the
+  // store is unavailable. See [OfflineQueue].
+  final bool enableOfflineQueue;
 
   const AllStakConfig({
     required this.apiKey,
@@ -145,6 +170,7 @@ class AllStakConfig {
     this.autoDetectRelease = true,
     this.autoRegisterRelease = true,
     this.enableAutoSessionTracking = true,
+    this.enableOfflineQueue = true,
   });
 
   /// The release actually stamped on events: explicit > ALLSTAK_RELEASE
@@ -185,7 +211,25 @@ class AllStak {
   SessionTracker? _sessionTracker;
   _SessionLifecycleObserver? _sessionObserver;
 
-  AllStak._(this.config, {bool forceSessionTracking = false}) {
+  /// Persistent offline spool. Null when the offline queue is disabled. See
+  /// [OfflineQueue]. Survives app restarts + network outages.
+  OfflineQueue? _offlineQueue;
+
+  /// Completes once the init-time drain finishes (success or fail-open). Tests
+  /// await this to assert re-send behavior deterministically; production code
+  /// never needs it.
+  Future<void>? _drainComplete;
+
+  /// Ingest paths whose payloads must NEVER be persisted offline. A replayed,
+  /// stale session start/end would skew release-health durations, so session
+  /// lifecycle calls stay strictly fire-and-forget.
+  static const Set<String> _nonPersistablePaths = {
+    SessionTracker.pathStart,
+    SessionTracker.pathEnd,
+  };
+
+  AllStak._(this.config,
+      {bool forceSessionTracking = false, OfflineQueue? offlineQueue}) {
     _tags.addAll(config.tags);
     // Release-tracking metadata is stamped onto _tags once at init so every
     // outgoing event payload (errors, logs, http, db) picks it up via the
@@ -194,19 +238,75 @@ class AllStak {
     if (!_tags.containsKey('platform')) {
       _tags['platform'] = 'flutter';
     }
+    _initOfflineQueue(offlineQueue);
     _registerRuntimeRelease();
     _startSessionTracking(force: forceSessionTracking);
   }
 
   /// [forceSessionTracking] is a test-only seam: it bypasses the
   /// `flutter test` runtime guard so the session lifecycle can be asserted in
-  /// unit tests. Production callers never set it.
+  /// unit tests. [offlineQueue] is a test-only seam to inject a spool backed by
+  /// a temp directory; production resolves its own via the native channel.
+  /// Production callers never set either.
   static AllStak init(AllStakConfig config,
-      {bool forceSessionTracking = false}) {
-    final sdk = AllStak._(config, forceSessionTracking: forceSessionTracking);
+      {bool forceSessionTracking = false, OfflineQueue? offlineQueue}) {
+    final sdk = AllStak._(config,
+        forceSessionTracking: forceSessionTracking, offlineQueue: offlineQueue);
     _instance = sdk;
     return sdk;
   }
+
+  /// Resolve the spool directory via the native platform channel. Returns null
+  /// (queue degrades to a no-op) on web, in tests, or when the channel is
+  /// unavailable — fail-open.
+  static Future<String?> _resolveSpoolDir() async {
+    try {
+      if (kIsWeb) return null;
+      final dir = await _NativeChannel.channel.invokeMethod<String>('spoolDir');
+      return (dir != null && dir.isNotEmpty) ? dir : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _initOfflineQueue(OfflineQueue? injected) {
+    if (!config.enableOfflineQueue || config.apiKey.isEmpty) return;
+    try {
+      _offlineQueue = injected ?? OfflineQueue(dirResolver: _resolveSpoolDir);
+      // Drain previously-persisted events on the next tick so init never blocks
+      // on disk or network. Fail-open throughout.
+      _drainComplete = _drainOfflineQueue();
+    } catch (_) {
+      // Fail-open: an unwritable/unavailable store must never break init.
+      _offlineQueue = null;
+    }
+  }
+
+  /// Load persisted events and re-send them through the existing transport.
+  /// An entry is removed (by virtue of [OfflineQueue.drainAll] clearing the
+  /// spool) only once it is accepted (2xx) or permanently undeliverable
+  /// (non-429 4xx); anything that still fails is re-persisted. Fail-open.
+  Future<void> _drainOfflineQueue() async {
+    final queue = _offlineQueue;
+    if (queue == null) return;
+    try {
+      final entries = await queue.drainAll();
+      for (final entry in entries) {
+        final outcome = await _deliverScrubbed(entry.path, entry.body);
+        if (outcome == _DeliveryOutcome.retryable) {
+          // Still undeliverable — put it back so a later init retries it.
+          await queue.enqueue(entry.path, entry.body);
+        }
+      }
+    } catch (_) {
+      // Fail-open: draining must never throw.
+    }
+  }
+
+  /// Test-only: awaits the init-time drain to settle. Returns immediately when
+  /// the offline queue is disabled/unavailable.
+  @visibleForTesting
+  Future<void> awaitOfflineDrain() async => _drainComplete ?? Future.value();
 
   static AllStak? get instance => _instance;
 
@@ -657,7 +757,6 @@ class AllStak {
   }
 
   Future<void> _send(String path, Map<String, dynamic> payload) async {
-    final url = Uri.parse('${config.host}$path');
     final merged = {
       ...payload,
       'metadata': {
@@ -681,7 +780,30 @@ class AllStak {
       }
       return;
     }
+    // From here on we operate on the SCRUBBED bytes only — the same bytes that
+    // would be persisted offline. Nothing unredacted ever reaches disk.
     final body = jsonEncode(scrubbed);
+    final outcome = await _deliverScrubbed(path, body);
+    // Persist on a retryable failure (offline / timeout / 5xx / 429) so the
+    // event survives a network outage and an app restart. Session lifecycle
+    // calls are excluded — a replayed stale session would skew durations.
+    if (outcome == _DeliveryOutcome.retryable && _isPersistable(path)) {
+      try {
+        await _offlineQueue?.enqueue(path, body);
+      } catch (_) {
+        // Fail-open: persistence must never break capture.
+      }
+    }
+  }
+
+  bool _isPersistable(String path) =>
+      _offlineQueue != null && !_nonPersistablePaths.contains(path);
+
+  /// POST an already-scrubbed JSON [body] to [path]. Classifies the result so
+  /// the offline queue knows whether to retain (retryable) or discard
+  /// (delivered / permanently undeliverable) the entry. Never throws.
+  Future<_DeliveryOutcome> _deliverScrubbed(String path, String body) async {
+    final url = Uri.parse('${config.host}$path');
     try {
       final res = await http
           .post(
@@ -700,11 +822,19 @@ class AllStak {
         // ignore: avoid_print
         print('[AllStak] POST $path -> ${res.statusCode} $trim');
       }
+      final code = res.statusCode;
+      if (code >= 200 && code < 300) return _DeliveryOutcome.delivered;
+      // 429 (rate limited) and 5xx are transient -> keep for retry. Other 4xx
+      // (bad request, auth, etc.) are permanent -> drop, don't loop forever.
+      if (code == 429 || code >= 500) return _DeliveryOutcome.retryable;
+      return _DeliveryOutcome.permanent;
     } catch (e) {
       if (config.debug) {
         // ignore: avoid_print
         print('[AllStak] POST $path failed: $e');
       }
+      // Network error / timeout / app offline -> retryable.
+      return _DeliveryOutcome.retryable;
     }
   }
 

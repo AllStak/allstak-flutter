@@ -51,6 +51,12 @@ class AllStakPlugin : FlutterPlugin, MethodCallHandler {
                 prefs.edit().remove(PREFS_KEY).commit()
                 result.success(json)
             }
+            "spoolDir" -> {
+                // Persistent, sandboxed directory for the offline telemetry
+                // spool. filesDir is app-private internal storage that
+                // survives app restarts (cleared only on uninstall).
+                result.success(appContext.filesDir?.absolutePath)
+            }
             else -> result.notImplemented()
         }
     }
