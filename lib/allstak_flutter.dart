@@ -13,9 +13,11 @@ import 'package:flutter/widgets.dart' as widgets show runApp;
 import 'package:http/http.dart' as http;
 
 import 'sanitizer.dart';
+import 'src/native_crash.dart';
 import 'src/offline_queue.dart';
 import 'src/session.dart';
 
+export 'src/native_crash.dart' show NativeCrashRecord;
 export 'src/offline_queue.dart' show OfflineQueue, OfflineEntry;
 export 'src/session.dart' show Session, SessionStatus;
 
@@ -162,6 +164,17 @@ class AllStakConfig {
   // See [scrub] / [ScrubOptions]. Sentry parity = false.
   final bool sendDefaultPii;
 
+  // When true (default) the SDK arms async-signal-safe native crash handlers
+  // (iOS POSIX `sigaction` for SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE/SIGTRAP;
+  // Android an NDK `sigaction` handler) so hard crashes that NEVER surface as a
+  // Dart exception — force-unwrap traps, bad-pointer access, NDK/native signal
+  // crashes — are captured. The handler only writes a minimal fixed record to a
+  // pre-opened fd; the record is read on the NEXT launch and shipped via the
+  // existing transport with `native.crash=true`. Set false to install ONLY the
+  // legacy uncaught-exception handlers. Degrades gracefully (no-op) if the
+  // native lib fails to build/load — it never breaks existing consumers.
+  final bool enableNativeCrashCapture;
+
   const AllStakConfig({
     required this.apiKey,
     this.host = 'https://api.allstak.sa',
@@ -182,6 +195,7 @@ class AllStakConfig {
     this.enableAutoSessionTracking = true,
     this.enableOfflineQueue = true,
     this.sendDefaultPii = false,
+    this.enableNativeCrashCapture = true,
   });
 
   /// The release actually stamped on events: explicit > ALLSTAK_RELEASE
@@ -701,30 +715,98 @@ class AllStak {
     return values.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
-  /// Installs platform-side uncaught exception handlers (Android Kotlin /
-  /// iOS Obj-C) and drains any crash stashed by the previous app launch,
-  /// shipping it to /ingest/v1/errors.
+  /// Installs platform-side crash handlers and drains any crash stashed by the
+  /// previous app launch, shipping it to `/ingest/v1/errors`.
   ///
-  /// SCAFFOLDED: requires the companion Android AllStakPlugin.kt and iOS
-  /// AllStakPlugin.swift to be present in the host app's plugin registry,
-  /// which is wired up automatically when this package is listed in
-  /// pubspec.yaml. Verify on a real Android/iOS device build.
+  /// Two classes of handler are armed natively (the second gated by
+  /// [AllStakConfig.enableNativeCrashCapture], default on):
+  ///
+  /// 1. **Uncaught-exception handlers** (iOS `NSSetUncaughtExceptionHandler`,
+  ///    Android `Thread.setDefaultUncaughtExceptionHandler`). These catch
+  ///    Obj-C `NSException`s and uncaught JVM `Throwable`s and stash a
+  ///    DTO-compatible JSON crash record.
+  /// 2. **Async-signal-safe POSIX signal handlers** (iOS `sigaction`, Android
+  ///    NDK `sigaction`) for SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE/SIGTRAP —
+  ///    the dominant class of REAL mobile crashes (force-unwrap traps,
+  ///    bad-pointer access, NDK/native signal crashes) that never surface as
+  ///    an exception. The handler is run inside a dying process, so it only
+  ///    writes a minimal fixed [NativeCrashRecord] to a pre-opened fd, then
+  ///    chains to the previous handler and re-raises. The record is read here
+  ///    on the NEXT launch (normal context) and shipped marked
+  ///    `native.crash=true`.
+  ///
+  /// Requires the companion Android `AllStakPlugin.kt` (+ NDK lib) and iOS
+  /// `AllStakPlugin.swift` to be present in the host app's plugin registry,
+  /// which is wired automatically when this package is listed in
+  /// `pubspec.yaml`. Fail-open: if the native channel or the native lib is
+  /// unavailable (web, tests, a build where the NDK lib failed to compile)
+  /// this is a silent no-op and the SDK keeps working. On-device E2E delivery
+  /// still requires real device/emulator verification.
   Future<void> installNativeHandlers() async {
     try {
       const channel = _NativeChannel.channel;
-      await channel
-          .invokeMethod('install', {'release': config.effectiveRelease});
-      final Object? raw = await channel.invokeMethod('drainPendingCrash');
-      if (raw is String && raw.isNotEmpty) {
-        try {
-          // Payload from native side is already DTO-compatible — ship as-is
-          // under the customer's api key.
-          _sendBestEffort('/ingest/v1/errors', _decodeNativeCrash(raw));
-        } catch (_) {}
+      await channel.invokeMethod('install', {
+        'release': config.effectiveRelease,
+        'enableSignalHandlers': config.enableNativeCrashCapture,
+      });
+      // 1. Legacy uncaught-exception record (already DTO-compatible JSON).
+      await _drainLegacyNativeCrash(channel);
+      // 2. Async-signal-safe native (signal / NDK) crash record.
+      if (config.enableNativeCrashCapture) {
+        await _drainNativeSignalCrash(channel);
       }
     } catch (_) {
       // channel not available on web or in tests — no-op.
     }
+  }
+
+  /// Drain the legacy uncaught-exception JSON crash record. The native side
+  /// already produced a DTO-compatible payload, so it ships as-is.
+  Future<void> _drainLegacyNativeCrash(MethodChannel channel) async {
+    try {
+      final Object? raw = await channel.invokeMethod('drainPendingCrash');
+      if (raw is String && raw.isNotEmpty) {
+        _sendBestEffort('/ingest/v1/errors', _decodeNativeCrash(raw));
+      }
+    } catch (_) {
+      // Fail-open: a missing/garbage legacy record never blocks startup.
+    }
+  }
+
+  /// Drain the async-signal-safe native crash record written by the signal/NDK
+  /// handler on the previous launch. The handler can't build JSON safely, so
+  /// it wrote a tiny [NativeCrashRecord.magic] text record; parse it here (in
+  /// normal context) into the standard `/ingest/v1/errors` shape and ship it
+  /// marked `native.crash=true`. Fail-open throughout.
+  Future<void> _drainNativeSignalCrash(MethodChannel channel) async {
+    try {
+      final Object? raw = await channel.invokeMethod('drainPendingSignalCrash');
+      if (raw is! String || raw.isEmpty) return;
+      final record = NativeCrashRecord.parse(raw);
+      if (record == null) return; // corrupt / empty — drop, never ship noise.
+      final payload = buildNativeCrashPayload(record);
+      _sendBestEffort('/ingest/v1/errors', payload);
+    } catch (_) {
+      // Fail-open: native crash drain must never break startup.
+    }
+  }
+
+  /// Build the `/ingest/v1/errors` payload for a parsed native crash [record],
+  /// stamping the SDK's release/environment/session metadata so it matches
+  /// every other event the SDK emits. Exposed for unit testing the drain
+  /// handoff without a device.
+  @visibleForTesting
+  Map<String, dynamic> buildNativeCrashPayload(NativeCrashRecord record) {
+    return record.toErrorPayload(
+      release: config.effectiveRelease,
+      environment: config.environment,
+      sdkName: config.sdkName,
+      sdkVersion: config.sdkVersion,
+      platformTag: config.platform,
+      dist: config.dist,
+      sessionId: _sessionTracker?.currentSessionId,
+      extraMetadata: Map<String, String>.from(_tags),
+    );
   }
 
   Map<String, dynamic> _decodeNativeCrash(String json) {

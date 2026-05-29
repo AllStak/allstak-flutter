@@ -44,4 +44,33 @@ android {
     defaultConfig {
         minSdk = 21
     }
+
+    // Async-signal-safe NDK crash-capture native library (liballstak_crash.so).
+    // Gated so the SDK degrades gracefully when no NDK is installed: the CMake
+    // build is only wired in when `allstak.enableNdkCrashCapture=true` is set in
+    // the consuming app's gradle.properties AND an NDK is available. Without it,
+    // the plugin builds as a pure-Kotlin library (signal capture is a no-op and
+    // the SDK keeps working) — so adding this SDK never forces an NDK toolchain
+    // on apps that don't want native crash capture.
+    def ndkCrashEnabled = project.hasProperty("allstak.enableNdkCrashCapture") &&
+            project.property("allstak.enableNdkCrashCapture").toString().toBoolean()
+    if (ndkCrashEnabled) {
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+                version = "3.22.1"
+            }
+        }
+        defaultConfig {
+            externalNativeBuild {
+                cmake {
+                    // Async-signal-safe; -O2 keeps the handler tight. No exceptions/RTTI.
+                    cFlags "-O2", "-fvisibility=hidden", "-Wall"
+                }
+            }
+            ndk {
+                abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
+            }
+        }
+    }
 }

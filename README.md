@@ -102,6 +102,24 @@ MaterialApp(
 | `service` | Logical app service name. |
 | `tags` | Tags added to telemetry. |
 | `transportTimeout` | Per-request timeout. |
+| `enableNativeCrashCapture` | Default `true`. Arms async-signal-safe native crash handlers (iOS POSIX `sigaction`; Android NDK `sigaction`) for hard crashes that never surface as a Dart exception. Degrades to a no-op if the native lib is unavailable. |
+
+## Native crash capture
+
+Beyond Flutter/Dart errors and the platform uncaught-exception handlers, the SDK
+arms async-signal-safe POSIX signal handlers (SIGSEGV/SIGABRT/SIGBUS/SIGILL/
+SIGFPE/SIGTRAP) so it captures force-unwrap traps, bad-pointer access, and
+NDK/native signal crashes. A minimal record is written to disk during the crash
+and shipped on the next launch marked `native.crash=true`.
+
+- iOS works out of the box (signal handlers are pure-Swift in the plugin).
+- Android signal/NDK capture requires opting into the bundled native library —
+  set `allstak.enableNdkCrashCapture=true` in your app's `gradle.properties`
+  (requires the Android NDK). Without it, the SDK still captures uncaught JVM
+  exceptions; native signal capture is a graceful no-op.
+
+> On-device end-to-end delivery of native signal/NDK crashes requires real
+> device/emulator verification.
 
 ## Privacy
 
