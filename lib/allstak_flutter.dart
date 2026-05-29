@@ -152,6 +152,16 @@ class AllStakConfig {
   // store is unavailable. See [OfflineQueue].
   final bool enableOfflineQueue;
 
+  // When false (default) the SDK behaves like Sentry's default: free-text PII
+  // (email addresses, client IPv4 literals) that leaks into event values is
+  // scrubbed to `[REDACTED]`, and any auto-collected client IP is dropped.
+  // High-risk financial/identity data (Luhn-valid credit-card numbers,
+  // hyphenated US SSNs) is ALWAYS scrubbed regardless of this flag. Set true
+  // to opt into shipping that auto-collected PII — the *explicit* user object
+  // set via [setUser] is NEVER affected by this flag (it ships either way).
+  // See [scrub] / [ScrubOptions]. Sentry parity = false.
+  final bool sendDefaultPii;
+
   const AllStakConfig({
     required this.apiKey,
     this.host = 'https://api.allstak.sa',
@@ -171,6 +181,7 @@ class AllStakConfig {
     this.autoRegisterRelease = true,
     this.enableAutoSessionTracking = true,
     this.enableOfflineQueue = true,
+    this.sendDefaultPii = false,
   });
 
   /// The release actually stamped on events: explicit > ALLSTAK_RELEASE
@@ -769,7 +780,10 @@ class AllStak {
     // Pure (no mutation), mobile-safe (synchronous), fail-closed for this event.
     Map<String, dynamic> scrubbed;
     try {
-      final out = scrub(merged);
+      final out = scrub(
+        merged,
+        options: ScrubOptions(sendDefaultPii: config.sendDefaultPii),
+      );
       scrubbed = out is Map<String, dynamic>
           ? out
           : (out is Map ? Map<String, dynamic>.from(out) : merged);
