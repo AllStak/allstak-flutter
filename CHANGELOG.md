@@ -1,5 +1,51 @@
 ## Unreleased — 2026-05-29
 
+### Added — Release-health session tracking (start/end + crash-free)
+- Automatic session lifecycle tied to the Flutter app lifecycle. On init the SDK
+  opens a session and POSTs `/ingest/v1/sessions/start`; on graceful shutdown (or
+  an explicit `close()` / `endSession()`) it POSTs `/ingest/v1/sessions/end` with
+  the final status and accumulated duration. Sessions are **never sampled** so
+  crash-free rates stay accurate.
+- `SessionStatus` vocabulary (`ok` / `exited` / `errored` / `crashed` / `abnormal`)
+  matches the backend `/sessions/end` contract; an unhandled/fatal exception marks
+  the session `crashed`, feeding crash-free-sessions / crash-free-users release
+  health on the server.
+- New `AllStakConfig.enableAutoSessionTracking` (**default on**); a
+  `_SessionLifecycleObserver` (`WidgetsBindingObserver`) drives end-on-detach.
+  `AllStak.sessionId` exposes the current session id, also stamped onto error /
+  log / http payloads for correlation. See `lib/src/session.dart`.
+
+### Added — Offline / persistent transport queue (survive restart + outage)
+- When the live transport cannot deliver an event (network outage, or events
+  still pending), the SDK persists the **already PII-scrubbed** wire bytes to a
+  line-oriented on-disk spool instead of dropping them, and drains the spool on
+  the next SDK init (sentry-dart parity). See `lib/src/offline_queue.dart`
+  (`OfflineQueue`, `OfflineEntry`, now exported from the package root).
+- Scrub-before-persist: only sanitized bytes ever touch disk. The spool is
+  bounded (max-entry cap + age-based eviction) and degrades to a silent no-op
+  when no persistent store is available (web / tests). Session lifecycle calls
+  (`/sessions/start`, `/sessions/end`) are intentionally **never persisted** so a
+  replayed stale session can't corrupt release-health math.
+- New `AllStakConfig.enableOfflineQueue` (**default on**).
+
+### Added — Value-pattern PII scrubbing + `sendDefaultPii`
+- Extended the single sanitizer chokepoint (`lib/sanitizer.dart`) with free-text
+  VALUE scrubbing on top of the existing key-name redaction, reaching Sentry
+  data-scrubbing parity:
+  - **Always** (regardless of `sendDefaultPii`): Luhn-valid credit-card numbers
+    (13–19 digits, space/hyphen separators; Luhn-invalid digit runs such as order
+    ids / timestamps are preserved) and hyphenated US SSNs.
+  - **Unless `sendDefaultPii=true`** (default `false` = Sentry parity): email
+    addresses and validated-octet IPv4 literals.
+- Value scrubbing skips identifiers that must reach the wire verbatim (stack-frame
+  filename/function/absPath, release/sdk/version/dist, URLs/paths/hosts,
+  trace/span/request ids, timestamps, the SDK's own `sessionId`) and the explicit
+  `setUser` subtree (intentional identity; not stripped by `sendDefaultPii`,
+  matching Sentry). Regexes compile once; strings >16 KB are skipped; per-value
+  scrubbing is fail-open so it can never drop an event.
+- New `ScrubOptions` + `AllStakConfig.sendDefaultPii` (**default false**) wire
+  through the existing `scrub()` call in `_send`.
+
 ### Added — Native signal / NDK crash capture (async-signal-safe)
 - Broadened native crash capture beyond uncaught-exception handlers, which miss
   the dominant class of real mobile crashes:
@@ -30,11 +76,23 @@
   the SDK keeps working — adding the SDK never forces an NDK toolchain on apps.
 
 ### Tests
+- `test/allstak_flutter_test.dart` — session lifecycle (start/end POST contract,
+  status transitions, `sessionId` stamping, lifecycle-observer end-on-detach),
+  release auto-detection ordering, and offline-queue integration via injected
+  seams.
+- `test/offline_queue_test.dart` — enqueue/drain round-trip, bounded cap + age
+  eviction, scrub-before-persist invariant, no-store no-op, and corrupt-line
+  tolerance.
+- `test/sanitizer_test.dart` — value-pattern scrubbing (Luhn-valid CC vs.
+  Luhn-invalid passthrough, hyphenated SSN, email + IPv4 gated by
+  `sendDefaultPii`, verbatim-identifier skip list, `setUser` subtree preserved)
+  on top of the existing key-name denylist coverage.
 - `test/native_crash_test.dart` — record parsing (well-formed iOS/Android,
   unknown-key tolerance, frame cap, corrupt/empty rejection, signal-name
   mapping), payload shaping (`native.crash=true` wire contract), and the
   next-launch drain handoff via a mocked native channel (install gating, drain
-  sequence, opt-out, corrupt-drop). 18 tests; full suite 113/113 green.
+  sequence, opt-out, corrupt-drop).
+- Full suite **113/113 green** at HEAD.
 
 ### Verification (honest scope)
 - Dart: `flutter pub get` + `flutter analyze` (no issues) + `flutter test`
