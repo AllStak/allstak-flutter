@@ -3,3 +3,9 @@ android/app/
 android/local.properties
 ios/Flutter/
 ios/Runner/
+
+# Build / tooling artifacts must never ship in the published archive.
+# A .pubignore overrides .gitignore for pub, so these have to be repeated here.
+build/
+.dart_tool/
+.idea/

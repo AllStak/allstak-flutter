@@ -1,5 +1,5 @@
 group = "io.allstak.flutter"
-version = "1.0.3"
+version = "1.1.0"
 
 buildscript {
     ext.kotlin_version = "1.9.10"
@@ -46,14 +46,43 @@ android {
     }
 
     // Async-signal-safe NDK crash-capture native library (liballstak_crash.so).
-    // Gated so the SDK degrades gracefully when no NDK is installed: the CMake
-    // build is only wired in when `allstak.enableNdkCrashCapture=true` is set in
-    // the consuming app's gradle.properties AND an NDK is available. Without it,
-    // the plugin builds as a pure-Kotlin library (signal capture is a no-op and
-    // the SDK keeps working) — so adding this SDK never forces an NDK toolchain
-    // on apps that don't want native crash capture.
-    def ndkCrashEnabled = project.hasProperty("allstak.enableNdkCrashCapture") &&
-            project.property("allstak.enableNdkCrashCapture").toString().toBoolean()
+    //
+    // DEFAULT-ON: the CMake build is wired in automatically so apps get native
+    // signal/NDK crash capture out of the box — matching the Dart-side
+    // `enableNativeCrashCapture` default. It is enabled UNLESS the consuming app
+    // explicitly opts out with `allstak.enableNdkCrashCapture=false` in its
+    // gradle.properties, AND it is auto-skipped when no NDK is installed so the
+    // plugin still builds as a pure-Kotlin library (signal capture is then a
+    // no-op and the SDK keeps working). Net effect: native crash capture is on
+    // by default when an NDK is present, and adding this SDK never HARD-fails a
+    // build on a machine without an NDK toolchain.
+    def ndkOptOut = project.hasProperty("allstak.enableNdkCrashCapture") &&
+            !project.property("allstak.enableNdkCrashCapture").toString().toBoolean()
+    // Resolve an NDK directory from the standard locations so default-on never
+    // breaks a build that simply has no NDK installed.
+    def ndkAvailable = false
+    try {
+        def localProps = new Properties()
+        def localPropsFile = rootProject.file("local.properties")
+        if (localPropsFile.exists()) {
+            localPropsFile.withInputStream { localProps.load(it) }
+        }
+        def ndkDir = localProps.getProperty("ndk.dir") ?:
+                System.getenv("ANDROID_NDK_HOME") ?:
+                System.getenv("ANDROID_NDK_ROOT")
+        def sdkDir = localProps.getProperty("sdk.dir") ?:
+                System.getenv("ANDROID_HOME") ?:
+                System.getenv("ANDROID_SDK_ROOT")
+        if (ndkDir != null && new File(ndkDir).exists()) {
+            ndkAvailable = true
+        } else if (sdkDir != null && new File(sdkDir, "ndk").exists()) {
+            // Any side-by-side NDK under $SDK/ndk/<version> counts.
+            ndkAvailable = new File(sdkDir, "ndk").listFiles()?.any { it.isDirectory() } ?: false
+        }
+    } catch (ignored) {
+        ndkAvailable = false
+    }
+    def ndkCrashEnabled = !ndkOptOut && ndkAvailable
     if (ndkCrashEnabled) {
         externalNativeBuild {
             cmake {

@@ -1,6 +1,6 @@
 name: allstak_flutter
 description: "AllStak Flutter SDK for error tracking, request telemetry, breadcrumbs, sanitization, and mobile observability."
-version: 1.0.3
+version: 1.1.0
 homepage: https://app.allstak.sa
 repository: https://github.com/AllStak/allstak-flutter
 

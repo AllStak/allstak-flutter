@@ -4,7 +4,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'allstak_flutter'
-  s.version          = '1.0.3'
+  s.version          = '1.1.0'
   s.summary          = 'AllStak Flutter SDK native crash capture plugin (iOS).'
   s.description      = <<-DESC
 AllStak Flutter SDK for error tracking, request telemetry, breadcrumbs,

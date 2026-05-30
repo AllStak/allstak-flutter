@@ -8,7 +8,7 @@
 ///      keys against the canonical denylist; the value becomes `[REDACTED]`.
 ///   2. VALUE-PATTERN redaction (this wave): scans free-text string *values*
 ///      for high-risk PII patterns and replaces the matched span with
-///      `[REDACTED]`. Layered for @sentry data-scrubbing parity:
+///      `[REDACTED]`. Layered value-pattern data scrubbing:
 ///        A) ALWAYS — credit-card numbers that pass the Luhn checksum, and
 ///           US SSNs written with hyphens (`NNN-NN-NNNN`). These are
 ///           never legitimately wanted in telemetry.
@@ -127,8 +127,8 @@ const Set<String> kValueScrubExemptKeys = <String>{
 
 /// Top-level (exact, case-sensitive) keys whose ENTIRE subtree is exempt from
 /// value-pattern scrubbing. The explicit `user` object set via `setUser`
-/// (id/email/ip) is intentional identification and ships as-is — matching
-/// Sentry, `sendDefaultPii` does NOT strip explicitly-set user data. Key-name
+/// (id/email/ip) is intentional identification and ships as-is —
+/// `sendDefaultPii` does NOT strip explicitly-set user data. Key-name
 /// redaction still applies inside the subtree (e.g. `user.password`).
 const Set<String> kValueScrubExemptSubtrees = <String>{
   'user',
@@ -166,7 +166,7 @@ class ScrubOptions {
   /// When true, the (B) auto-PII scrubbers (email + IPv4) are DISABLED because
   /// the user explicitly opted into shipping PII. The (A) financial/identity
   /// scrubbers (Luhn-valid CC, hyphenated SSN) ALWAYS run regardless. Default
-  /// false = Sentry parity (auto-PII is scrubbed).
+  /// false = auto-PII is scrubbed.
   final bool sendDefaultPii;
 
   const ScrubOptions({this.sendDefaultPii = false});

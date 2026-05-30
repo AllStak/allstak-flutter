@@ -3,7 +3,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
+import 'dart:io' show HttpOverrides, Platform;
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -13,10 +13,17 @@ import 'package:flutter/widgets.dart' as widgets show runApp;
 import 'package:http/http.dart' as http;
 
 import 'sanitizer.dart';
+import 'src/dio_interceptor.dart';
+import 'src/http_overrides.dart';
+import 'src/log_bridge.dart';
 import 'src/native_crash.dart';
 import 'src/offline_queue.dart';
 import 'src/session.dart';
 
+export 'src/dio_interceptor.dart'
+    show allStakDioInterceptor, DioWrapperFactory, DioSpanIds, DioTelemetrySink;
+export 'src/http_overrides.dart' show AllStakHttpOverrides;
+export 'src/log_bridge.dart' show AllStakLogBridge, AllStakLogRecord;
 export 'src/native_crash.dart' show NativeCrashRecord;
 export 'src/offline_queue.dart' show OfflineQueue, OfflineEntry;
 export 'src/session.dart' show Session, SessionStatus;
@@ -66,7 +73,7 @@ class _NativeChannel {
 
 /// SDK identity sent on the wire as `sdk.name` / `sdk.version` in event metadata.
 const String kAllStakSdkName = 'allstak-flutter';
-const String kAllStakSdkVersion = '1.0.3';
+const String kAllStakSdkVersion = '1.1.0';
 
 /// Build-time release override. Set with `--dart-define=ALLSTAK_RELEASE=...`
 /// (or `--dart-define-from-file`). `String.fromEnvironment` is resolved by the
@@ -154,14 +161,14 @@ class AllStakConfig {
   // store is unavailable. See [OfflineQueue].
   final bool enableOfflineQueue;
 
-  // When false (default) the SDK behaves like Sentry's default: free-text PII
-  // (email addresses, client IPv4 literals) that leaks into event values is
+  // When false (default) the SDK scrubs free-text PII:
+  // email addresses and client IPv4 literals that leak into event values are
   // scrubbed to `[REDACTED]`, and any auto-collected client IP is dropped.
   // High-risk financial/identity data (Luhn-valid credit-card numbers,
   // hyphenated US SSNs) is ALWAYS scrubbed regardless of this flag. Set true
   // to opt into shipping that auto-collected PII — the *explicit* user object
   // set via [setUser] is NEVER affected by this flag (it ships either way).
-  // See [scrub] / [ScrubOptions]. Sentry parity = false.
+  // See [scrub] / [ScrubOptions]. Default = false.
   final bool sendDefaultPii;
 
   // When true (default) the SDK arms async-signal-safe native crash handlers
@@ -174,6 +181,35 @@ class AllStakConfig {
   // legacy uncaught-exception handlers. Degrades gracefully (no-op) if the
   // native lib fails to build/load — it never breaks existing consumers.
   final bool enableNativeCrashCapture;
+
+  // When true (default) the SDK ARMS the native crash handlers automatically
+  // from [AllStak.runApp] / [AllStak.init] (right after the widgets binding is
+  // ready), so a host app gets native crash capture with zero extra calls —
+  // [installNativeHandlers] stays as an explicit escape hatch. Auto-arming is
+  // always skipped under web (`kIsWeb`) and the `flutter test` runtime (the
+  // native channel is not available there), and is a silent no-op if the
+  // native side is missing. Set false to opt out of auto-arming and call
+  // [installNativeHandlers] yourself. This controls *when/whether the handlers
+  // are armed*; [enableNativeCrashCapture] controls whether the async-signal
+  // handlers are part of that arm vs only the legacy uncaught-exception ones.
+  final bool autoInstallNativeHandlers;
+
+  // When true (default) the SDK installs a process-wide `HttpOverrides.global`
+  // from [AllStak.runApp] so every `dart:io` `HttpClient` (the transport under
+  // `package:http`'s IOClient, Dio's default adapter, `Image.network`, etc.) is
+  // auto-instrumented as an outbound http-request — no `allstak.httpClient()`
+  // wiring needed per call. Requests to AllStak's own ingest host are skipped
+  // to prevent recursion. Always skipped under web (`kIsWeb`) and the
+  // `flutter test` runtime. Set false to keep the explicit-client-only model.
+  final bool enableHttpOverrides;
+
+  // When true (default) the SDK attaches a `dart:developer` log listener from
+  // [AllStak.init] / [AllStak.runApp] so `log()` calls (and anything that
+  // funnels through `package:logging`'s `dart:developer` bridge) are shipped to
+  // `/ingest/v1/logs`. SEVERE/level>=1000 records, and any record carrying an
+  // `error` object, are promoted to [captureException]. Always skipped under
+  // the `flutter test` runtime. Set false to opt out of the logging bridge.
+  final bool captureLogs;
 
   const AllStakConfig({
     required this.apiKey,
@@ -196,6 +232,9 @@ class AllStakConfig {
     this.enableOfflineQueue = true,
     this.sendDefaultPii = false,
     this.enableNativeCrashCapture = true,
+    this.autoInstallNativeHandlers = true,
+    this.enableHttpOverrides = true,
+    this.captureLogs = true,
   });
 
   /// The release actually stamped on events: explicit > ALLSTAK_RELEASE
@@ -222,7 +261,7 @@ class AllStakConfig {
   }
 }
 
-class AllStak {
+class AllStak implements DioTelemetrySink {
   final AllStakConfig config;
   final Map<String, String> _tags = {};
   String? _userId;
@@ -239,6 +278,22 @@ class AllStak {
   /// Persistent offline spool. Null when the offline queue is disabled. See
   /// [OfflineQueue]. Survives app restarts + network outages.
   OfflineQueue? _offlineQueue;
+
+  /// Automatic logging bridge. Null when `captureLogs` is off or skipped under
+  /// the test runtime. Forwards application logs to `/ingest/v1/logs` and
+  /// promotes SEVERE / error-bearing records to [captureException].
+  AllStakLogBridge? _logBridge;
+
+  /// The previous `HttpOverrides.global` we wrapped (if any). Restored on
+  /// [close] so the SDK never permanently clobbers an app-set override.
+  HttpOverrides? _previousHttpOverrides;
+  bool _httpOverridesInstalled = false;
+
+  /// Guards [installNativeHandlers] so arming (and the one-shot previous-launch
+  /// crash drain) runs at most once per client, even when both the `init()`
+  /// auto-arm and an explicit call (or a `runApp()` re-arm) fire. Draining the
+  /// stashed crash twice would double-ship the same event.
+  bool _nativeArmed = false;
 
   /// Completes once the init-time drain finishes (success or fail-open). Tests
   /// await this to assert re-send behavior deterministically; production code
@@ -266,6 +321,7 @@ class AllStak {
     _initOfflineQueue(offlineQueue);
     _registerRuntimeRelease();
     _startSessionTracking(force: forceSessionTracking);
+    _startLogBridge(force: forceSessionTracking);
   }
 
   /// [forceSessionTracking] is a test-only seam: it bypasses the
@@ -278,7 +334,95 @@ class AllStak {
     final sdk = AllStak._(config,
         forceSessionTracking: forceSessionTracking, offlineQueue: offlineQueue);
     _instance = sdk;
+    // Auto-arm native crash handlers right after init (default-on, guarded).
+    // Apps that call only `init()` (not `runApp()`) — e.g. when they own their
+    // own zone/binding setup — still get native crash capture with no extra
+    // call. The arm assumes the widgets binding is (or will shortly be) ready;
+    // it is a fire-and-forget that fails open if the channel is not available.
+    sdk._maybeAutoArmNativeHandlers();
     return sdk;
+  }
+
+  /// Auto-arm the native crash handlers from init/runApp when
+  /// `autoInstallNativeHandlers` is on. Skipped on web and under the
+  /// `flutter test` runtime (the native channel is mocked/absent there).
+  /// Fire-and-forget + fail-open: a missing native side is a silent no-op.
+  /// [installNativeHandlers] stays available as an explicit escape hatch.
+  void _maybeAutoArmNativeHandlers() {
+    try {
+      if (!config.autoInstallNativeHandlers) return;
+      if (kIsWeb) return;
+      if (_isLikelyTestRuntime()) return;
+      // Fire-and-forget — never block init on the platform channel.
+      // ignore: discarded_futures
+      installNativeHandlers();
+    } catch (_) {
+      // Fail-open: auto-arming must never break init.
+    }
+  }
+
+  /// Install the process-wide `dart:io` HTTP override when
+  /// `enableHttpOverrides` is on, so every `HttpClient` is auto-instrumented.
+  /// Skipped on web and under the `flutter test` runtime. Idempotent and
+  /// fail-open. We wrap (and remember) any existing `HttpOverrides.global` so
+  /// an app-set override keeps working and is restored on [close].
+  void _maybeInstallHttpOverrides() {
+    try {
+      if (!config.enableHttpOverrides) return;
+      if (kIsWeb) return;
+      if (_isLikelyTestRuntime()) return;
+      if (_httpOverridesInstalled) return;
+      final previous = HttpOverrides.current;
+      _previousHttpOverrides = previous;
+      HttpOverrides.global = buildHttpOverrides(inner: previous);
+      _httpOverridesInstalled = true;
+    } catch (_) {
+      // Fail-open: failing to install overrides must never break startup.
+    }
+  }
+
+  /// Build the [AllStakHttpOverrides] wired to this client's transport. Exposed
+  /// for tests and for apps that want to compose the override themselves (e.g.
+  /// inside a custom `runZoned(... , zoneValues: ...)`). [inner] is delegated to
+  /// for client creation so an existing override is preserved.
+  @visibleForTesting
+  AllStakHttpOverrides buildHttpOverrides({HttpOverrides? inner}) {
+    return AllStakHttpOverrides(
+      ingestHost: config.host,
+      inner: inner,
+      hexId: _hexId,
+      traceId: getTraceId,
+      currentSpanId: () => _currentSpanId,
+      mergeBaggage: _mergeBaggage,
+      allstakBaggage: (t, r, s) => _allstakBaggage(t, r, s),
+      record: ({
+        required String method,
+        required String host,
+        required String path,
+        required int statusCode,
+        required int durationMs,
+        required String traceId,
+        required String requestId,
+        required String spanId,
+        String? parentSpanId,
+        String? errorFingerprint,
+      }) {
+        // Fire-and-forget — never block the host app's request on ingest.
+        captureRequest(
+          method: method,
+          host: host,
+          path: path,
+          statusCode: statusCode,
+          durationMs: durationMs,
+          direction: 'outbound',
+          traceId: traceId,
+          requestId: requestId,
+          spanId: spanId,
+          parentSpanId: parentSpanId,
+          errorFingerprint: errorFingerprint,
+        );
+      },
+    );
   }
 
   /// Resolve the spool directory via the native platform channel. Returns null
@@ -361,6 +505,9 @@ class AllStak {
         sdkName: config.sdkName,
         sdkVersion: config.sdkVersion,
         platform: config.platform,
+        stateStore: kIsWeb
+            ? null
+            : FileSessionStateStore.defaultFor(config.effectiveRelease),
       );
       tracker.start(userId: _userId);
       _sessionTracker = tracker;
@@ -377,6 +524,83 @@ class AllStak {
       // Fail-open: session tracking must never break init.
     }
   }
+
+  /// Create the automatic logging bridge (default-on via `captureLogs`).
+  /// Skipped under the `flutter test` runtime unless [force] is set (the
+  /// test seam) — a bridge that auto-promotes SEVERE logs to captured
+  /// exceptions would otherwise fire real network I/O from every test that
+  /// logs. The bridge is created here so it is ready immediately; the host app
+  /// attaches its logger stream via [attachLogging] (one line) and any record
+  /// the SDK feeds via [logBridge] flows to `/ingest/v1/logs`. Fail-open.
+  void _startLogBridge({bool force = false}) {
+    if (!config.captureLogs) return;
+    if (!force && _isLikelyTestRuntime()) return;
+    if (config.apiKey.isEmpty) return;
+    try {
+      _logBridge = AllStakLogBridge(_onLogRecord);
+    } catch (_) {
+      // Fail-open: the logging bridge must never break init.
+    }
+  }
+
+  /// Sink the [AllStakLogBridge] calls for every normalized record. Ships the
+  /// record to `/ingest/v1/logs`, and — when it is SEVERE+ or carries an error
+  /// object — also promotes it to [captureException] so it surfaces as an
+  /// error, stamped with the active trace/request ids. Fail-open.
+  void _onLogRecord(AllStakLogRecord rec) {
+    try {
+      final traceId = getTraceId();
+      final requestId = _hexId(16);
+      final meta = <String, String>{
+        if (rec.loggerName != null && rec.loggerName!.isNotEmpty)
+          'logger': rec.loggerName!,
+        'log.level':
+            rec.levelName.isNotEmpty ? rec.levelName : rec.level.toString(),
+        'traceId': traceId,
+        'requestId': requestId,
+      };
+      captureLog(rec.wireLevel, rec.message, metadata: meta);
+      if (rec.shouldPromote) {
+        final err = rec.error ?? rec.message;
+        captureException(
+          err,
+          stackTrace: rec.stackTrace,
+          context: {
+            'source': 'log-bridge',
+            if (rec.loggerName != null && rec.loggerName!.isNotEmpty)
+              'logger': rec.loggerName!,
+            'log.level':
+                rec.levelName.isNotEmpty ? rec.levelName : rec.level.toString(),
+            'traceId': traceId,
+            'requestId': requestId,
+          },
+          // A SHOUT / fatal-level log escalates release-health to crashed; a
+          // SEVERE / error-bearing one stays a handled error.
+          fatal: rec.wireLevel == 'fatal',
+        );
+      }
+    } catch (_) {
+      // Fail-open: forwarding a log must never break the app's logging path.
+    }
+  }
+
+  /// The automatic logging bridge, or null when `captureLogs` is off / skipped
+  /// under the test runtime. Use [attachLogging] for the common case.
+  AllStakLogBridge? get logBridge => _logBridge;
+
+  /// Forward a `package:logging`-style record stream into AllStak with one
+  /// line at app startup:
+  ///
+  /// ```dart
+  /// AllStak.instance?.attachLogging(Logger.root.onRecord);
+  /// ```
+  ///
+  /// Records flow to `/ingest/v1/logs`; SEVERE+ and error-bearing records are
+  /// promoted to captured exceptions. No-op when the bridge is unavailable.
+  /// Reads record fields via duck typing so it links against whatever
+  /// `package:logging` version the host app ships — no SDK dependency on it.
+  Object? attachLogging(dynamic onRecordStream) =>
+      _logBridge?.attachToLogging(onRecordStream);
 
   /// The active release-health session id, or null when no session is open.
   /// Attached to every captured error/event payload so the backend's error
@@ -401,6 +625,17 @@ class AllStak {
       if (observer != null) {
         WidgetsBinding.instance.removeObserver(observer);
         _sessionObserver = null;
+      }
+    } catch (_) {}
+    // Stop forwarding logs and restore any HTTP override we wrapped so the SDK
+    // never permanently mutates global state past its own lifetime.
+    try {
+      _logBridge?.detach();
+    } catch (_) {}
+    try {
+      if (_httpOverridesInstalled) {
+        HttpOverrides.global = _previousHttpOverrides;
+        _httpOverridesInstalled = false;
       }
     } catch (_) {}
     await flush();
@@ -439,6 +674,16 @@ class AllStak {
         // Bindings MUST be initialized inside the zone so framework callbacks
         // run in the guarded zone, otherwise Flutter throws "Zone mismatch".
         WidgetsFlutterBinding.ensureInitialized();
+
+        // Auto-arm native crash handlers now that the binding (and therefore
+        // the platform channel) is ready. Idempotent with the `init()` arm.
+        sdk._maybeAutoArmNativeHandlers();
+        // Install the process-wide dart:io HTTP override so every HttpClient
+        // (package:http IOClient, Dio's default adapter, Image.network, …) is
+        // auto-instrumented as an outbound http-request with zero per-call
+        // wiring. Default-on, guarded, restored on close(). `allstak.httpClient()`
+        // keeps working unchanged.
+        sdk._maybeInstallHttpOverrides();
 
         final previousOnError = FlutterError.onError;
         FlutterError.onError = (FlutterErrorDetails details) {
@@ -743,6 +988,11 @@ class AllStak {
   /// this is a silent no-op and the SDK keeps working. On-device E2E delivery
   /// still requires real device/emulator verification.
   Future<void> installNativeHandlers() async {
+    // Idempotent: arming + the one-shot previous-launch crash drain happen at
+    // most once per client. The auto-arm from `init()`/`runApp()` and an
+    // explicit escape-hatch call therefore never double-drain a stashed crash.
+    if (_nativeArmed) return;
+    _nativeArmed = true;
     try {
       const channel = _NativeChannel.channel;
       await channel.invokeMethod('install', {
@@ -948,6 +1198,63 @@ class AllStak {
   http.Client httpClient({http.Client? inner}) {
     return _AllStakHttpClient(this, inner ?? http.Client());
   }
+
+  // ─── Dio interceptor wiring (DioTelemetrySink) ───────────────────────
+  //
+  // Dio's default adapter already runs through the global HttpOverrides when
+  // `enableHttpOverrides` is on, so these are only needed for the explicit
+  // Dio-interceptor path (custom adapter / overrides disabled). See
+  // [dioInterceptor].
+
+  @override
+  DioSpanIds beginOutboundSpan() {
+    return DioSpanIds(
+      traceId: getTraceId(),
+      requestId: _hexId(16),
+      spanId: _hexId(8),
+      parentSpanId: _currentSpanId,
+    );
+  }
+
+  @override
+  void recordOutbound({
+    required String method,
+    required String host,
+    required String path,
+    required int statusCode,
+    required int durationMs,
+    required DioSpanIds ids,
+    String? errorFingerprint,
+  }) {
+    // Fire-and-forget — never block the host app's request on ingest.
+    captureRequest(
+      method: method,
+      host: host,
+      path: path,
+      statusCode: statusCode,
+      durationMs: durationMs,
+      direction: 'outbound',
+      traceId: ids.traceId,
+      requestId: ids.requestId,
+      spanId: ids.spanId,
+      parentSpanId: ids.parentSpanId,
+      errorFingerprint: errorFingerprint,
+    );
+  }
+
+  /// Builds a Dio interceptor wired to this client. Pass a [wrapperFactory]
+  /// that constructs Dio's `InterceptorsWrapper` (so the SDK never depends on
+  /// `package:dio`):
+  ///
+  /// ```dart
+  /// final i = AllStak.instance!.dioInterceptor(
+  ///   wrapperFactory: ({onRequest, onResponse, onError}) => InterceptorsWrapper(
+  ///     onRequest: onRequest, onResponse: onResponse, onError: onError),
+  /// );
+  /// dio.interceptors.add(i as Interceptor);
+  /// ```
+  Object? dioInterceptor({required DioWrapperFactory wrapperFactory}) =>
+      allStakDioInterceptor(wrapperFactory: wrapperFactory, sink: this);
 }
 
 /// Wraps any [http.Client] (by default `http.Client()`) so that every outbound

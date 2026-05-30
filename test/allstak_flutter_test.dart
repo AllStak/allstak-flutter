@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:allstak_flutter/allstak_flutter.dart';
+import 'package:allstak_flutter/src/session.dart' as session_impl;
 
 /// Tiny HTTP server that records request bodies so we can assert payloads.
 class _IngestServer {
@@ -33,6 +34,23 @@ class _IngestServer {
 
   Future<void> stop() async {
     await _server.close(force: true);
+  }
+}
+
+class _MemorySessionStore implements session_impl.SessionStateStore {
+  _MemorySessionStore([this.state]);
+  Map<String, dynamic>? state;
+  @override
+  Map<String, dynamic>? read() =>
+      state == null ? null : Map<String, dynamic>.from(state!);
+  @override
+  void write(Map<String, dynamic> state) {
+    this.state = Map<String, dynamic>.from(state);
+  }
+
+  @override
+  void clear() {
+    state = null;
   }
 }
 
@@ -305,9 +323,9 @@ void main() {
     });
 
     // Canary leak test — the Flutter equivalent of the leak_pos=0 check
-    // we run in production ClickHouse for the polyglot SDKs. We assert
+    // we run against the ingest API for the polyglot SDKs. We assert
     // that sensitive fields are scrubbed before the request body leaves
-    // _send. Benign fields pass through. (P0 security parity)
+    // _send. Benign fields pass through. (P0 security)
     test('canary should_not_leak_flutter is scrubbed on the wire', () async {
       const canary = 'should_not_leak_flutter';
       final sdk = AllStak.init(
@@ -615,6 +633,109 @@ void main() {
       expect(SessionStatus.errored.wire, 'errored');
       expect(SessionStatus.crashed.wire, 'crashed');
       expect(SessionStatus.abnormal.wire, 'abnormal');
+    });
+  });
+
+  group('SessionTracker abnormal recovery', () {
+    session_impl.SessionTracker tracker(
+      List<MapEntry<String, Map<String, dynamic>>> sent,
+      _MemorySessionStore store,
+    ) =>
+        session_impl.SessionTracker(
+          send: (path, payload) => sent.add(MapEntry(path, payload)),
+          release: 'r1',
+          environment: 'test',
+          sdkName: 'allstak-flutter',
+          sdkVersion: kAllStakSdkVersion,
+          platform: 'flutter',
+          stateStore: store,
+        );
+
+    test('clean shutdown does not report abnormal on next start', () {
+      final store = _MemorySessionStore();
+      final firstSent = <MapEntry<String, Map<String, dynamic>>>[];
+      tracker(firstSent, store)
+        ..start()
+        ..end();
+
+      final secondSent = <MapEntry<String, Map<String, dynamic>>>[];
+      tracker(secondSent, store).start();
+
+      expect(
+          secondSent.where((e) => e.key == session_impl.SessionTracker.pathEnd),
+          isEmpty);
+      expect(
+          secondSent
+              .where((e) => e.key == session_impl.SessionTracker.pathStart),
+          hasLength(1));
+    });
+
+    test('open session is reported abnormal on next start', () {
+      final store = _MemorySessionStore();
+      final session =
+          tracker(<MapEntry<String, Map<String, dynamic>>>[], store).start();
+
+      final secondSent = <MapEntry<String, Map<String, dynamic>>>[];
+      tracker(secondSent, store).start();
+
+      final recovered = secondSent
+          .firstWhere((e) => e.key == session_impl.SessionTracker.pathEnd)
+          .value;
+      expect(recovered['sessionId'], session.id);
+      expect(recovered['status'], SessionStatus.abnormal.wire);
+    });
+
+    test('crashed open session is reported crashed on next start', () {
+      final store = _MemorySessionStore();
+      final first = tracker(<MapEntry<String, Map<String, dynamic>>>[], store);
+      final session = first.start();
+      first.recordCrash();
+
+      final secondSent = <MapEntry<String, Map<String, dynamic>>>[];
+      tracker(secondSent, store).start();
+
+      final recovered = secondSent
+          .firstWhere((e) => e.key == session_impl.SessionTracker.pathEnd)
+          .value;
+      expect(recovered['sessionId'], session.id);
+      expect(recovered['status'], SessionStatus.crashed.wire);
+    });
+
+    test('corrupt state is cleared safely', () {
+      final store = _MemorySessionStore({'version': 1, 'bad': 'shape'});
+      final sent = <MapEntry<String, Map<String, dynamic>>>[];
+      tracker(sent, store).start();
+
+      expect(sent.where((e) => e.key == session_impl.SessionTracker.pathEnd),
+          isEmpty);
+      expect(sent.where((e) => e.key == session_impl.SessionTracker.pathStart),
+          hasLength(1));
+    });
+
+    test('recovered abnormal session is not reported twice', () {
+      final store = _MemorySessionStore();
+      tracker(<MapEntry<String, Map<String, dynamic>>>[], store).start();
+
+      final secondSent = <MapEntry<String, Map<String, dynamic>>>[];
+      tracker(secondSent, store)
+        ..start()
+        ..end();
+
+      final thirdSent = <MapEntry<String, Map<String, dynamic>>>[];
+      tracker(thirdSent, store).start();
+
+      expect(
+        secondSent.where((e) =>
+            e.key == session_impl.SessionTracker.pathEnd &&
+            e.value['status'] == SessionStatus.abnormal.wire),
+        hasLength(1),
+      );
+      expect(
+        thirdSent.where((e) =>
+            e.key == session_impl.SessionTracker.pathEnd &&
+            e.value['status'] == SessionStatus.abnormal.wire),
+        isEmpty,
+      );
     });
   });
 

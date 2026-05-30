@@ -107,7 +107,7 @@ void main() {
     });
   });
 
-  // ── Value-pattern scrubbing (Sentry data-scrubbing parity) ────────────────
+  // ── Value-pattern scrubbing (value-pattern data scrubbing) ────────────────
   group('Value-pattern scrubbing', () {
     // Layer A — ALWAYS scrubbed (regardless of sendDefaultPii).
 
@@ -214,7 +214,7 @@ void main() {
 
     // Exemptions — fields that must reach the wire VERBATIM.
 
-    test('explicit setUser object is NOT value-scrubbed (Sentry parity)', () {
+    test('explicit setUser object is NOT value-scrubbed', () {
       // The whole `user` subtree is intentional identification: email + ip ship
       // as-is even with sendDefaultPii=false.
       final out = scrub({

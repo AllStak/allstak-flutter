@@ -1,7 +1,7 @@
 /// Offline / persistent transport queue.
 ///
 /// A dependency-light file spool that lets buffered telemetry survive an app
-/// restart AND a network outage (sentry-dart parity). When the live transport
+/// restart AND a network outage. When the live transport
 /// fails to deliver an event (network error, timeout, app shutting down with
 /// events still pending) the SDK persists the *already PII-scrubbed* payload
 /// here instead of dropping it. On the next SDK init the spool is drained

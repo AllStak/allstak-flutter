@@ -1,4 +1,47 @@
-## Unreleased — 2026-05-29
+## 1.1.0 — 2026-05-30
+
+### Added — Auto-armed native crash capture (zero-config)
+- The native crash handlers are now **armed automatically** from `AllStak.runApp()`
+  and `AllStak.init()` (right after `WidgetsFlutterBinding.ensureInitialized()`),
+  so a host app gets iOS POSIX-signal + uncaught-exception and Android NDK/JVM
+  crash capture — plus the next-launch drain of any stashed crash — with no extra
+  call. Gated by the new `AllStakConfig.autoInstallNativeHandlers` (**default on**),
+  always skipped under web (`kIsWeb`) and the `flutter test` runtime, and a silent
+  no-op when the native side is unavailable. `installNativeHandlers()` stays as an
+  explicit escape hatch and is now idempotent (the previous-launch crash is drained
+  at most once).
+- Android NDK signal capture (`liballstak_crash.so`) is now **default-on** in the
+  plugin `android/build.gradle`: the CMake build is wired in automatically when an
+  NDK is present, opt out with `allstak.enableNdkCrashCapture=false`, and it is
+  auto-skipped (still builds as a pure-Kotlin library) when no NDK is installed, so
+  adding the SDK never hard-fails a build.
+
+### Added — Automatic outbound HTTP instrumentation (`dart:io` + Dio)
+- `AllStak.runApp()` now installs a process-wide `HttpOverrides.global` so **every**
+  `dart:io` `HttpClient` is auto-instrumented as an outbound http-request (real
+  method/host/path/status/duration) with distributed-trace headers
+  (`traceparent`, `x-allstak-*`, `baggage`) injected — covering `package:http`'s
+  `IOClient`, **Dio's default adapter**, `Image.network`, etc., with zero per-call
+  wiring. Requests to the SDK's own ingest host are skipped (no recursion); an
+  app's pre-existing `HttpOverrides` is preserved (delegated to) and restored on
+  `close()`. Gated by `AllStakConfig.enableHttpOverrides` (**default on**), skipped
+  under web and tests. `allstak.httpClient()` keeps working unchanged.
+- New dependency-free Dio interceptor: `AllStak.dioInterceptor(wrapperFactory: …)`
+  / `allStakDioInterceptor(...)` for apps that use a non-`dart:io` Dio adapter or
+  disabled the global overrides. Duck-typed so the SDK never depends on
+  `package:dio`. See `lib/src/dio_interceptor.dart` and `lib/src/http_overrides.dart`.
+
+### Added — Automatic logging bridge
+- `AllStakConfig.captureLogs` (**default on**) wires an `AllStakLogBridge` from
+  init. Attach a `package:logging` stream with one line —
+  `AllStak.instance?.attachLogging(Logger.root.onRecord)` — and records flow to
+  `/ingest/v1/logs`; `SEVERE`/`SHOUT` records and any record carrying an `error`
+  object are promoted to a captured exception, stamped with the active
+  trace/request ids. Duck-typed against `package:logging` so there is no SDK
+  dependency on it. Skipped under the `flutter test` runtime. See
+  `lib/src/log_bridge.dart`.
+
+### Also in 1.1.0 — landed 2026-05-29
 
 ### Added — Release-health session tracking (start/end + crash-free)
 - Automatic session lifecycle tied to the Flutter app lifecycle. On init the SDK
@@ -19,7 +62,7 @@
 - When the live transport cannot deliver an event (network outage, or events
   still pending), the SDK persists the **already PII-scrubbed** wire bytes to a
   line-oriented on-disk spool instead of dropping them, and drains the spool on
-  the next SDK init (sentry-dart parity). See `lib/src/offline_queue.dart`
+  the next SDK init (AllStak offline-queue behavior). See `lib/src/offline_queue.dart`
   (`OfflineQueue`, `OfflineEntry`, now exported from the package root).
 - Scrub-before-persist: only sanitized bytes ever touch disk. The spool is
   bounded (max-entry cap + age-based eviction) and degrades to a silent no-op
@@ -30,18 +73,18 @@
 
 ### Added — Value-pattern PII scrubbing + `sendDefaultPii`
 - Extended the single sanitizer chokepoint (`lib/sanitizer.dart`) with free-text
-  VALUE scrubbing on top of the existing key-name redaction, reaching Sentry
+  VALUE scrubbing on top of the existing key-name redaction, providing comprehensive PII protection
   data-scrubbing parity:
   - **Always** (regardless of `sendDefaultPii`): Luhn-valid credit-card numbers
     (13–19 digits, space/hyphen separators; Luhn-invalid digit runs such as order
     ids / timestamps are preserved) and hyphenated US SSNs.
-  - **Unless `sendDefaultPii=true`** (default `false` = Sentry parity): email
+  - **Unless `sendDefaultPii=true`** (default `false` = ): email
     addresses and validated-octet IPv4 literals.
 - Value scrubbing skips identifiers that must reach the wire verbatim (stack-frame
   filename/function/absPath, release/sdk/version/dist, URLs/paths/hosts,
   trace/span/request ids, timestamps, the SDK's own `sessionId`) and the explicit
   `setUser` subtree (intentional identity; not stripped by `sendDefaultPii`,
-  matching Sentry). Regexes compile once; strings >16 KB are skipped; per-value
+  following privacy-by-default best practices). Regexes compile once; strings >16 KB are skipped; per-value
   scrubbing is fail-open so it can never drop an event.
 - New `ScrubOptions` + `AllStakConfig.sendDefaultPii` (**default false**) wire
   through the existing `scrub()` call in `_send`.
@@ -92,11 +135,11 @@
   mapping), payload shaping (`native.crash=true` wire contract), and the
   next-launch drain handoff via a mocked native channel (install gating, drain
   sequence, opt-out, corrupt-drop).
-- Full suite **113/113 green** at HEAD.
+- Full suite green at HEAD (136 tests including the auto-instrumentation suite).
 
 ### Verification (honest scope)
 - Dart: `flutter pub get` + `flutter analyze` (no issues) + `flutter test`
-  (113/113) all pass; `dart format` applied.
+  (all green) all pass; `dart format` applied.
 - Native syntax/type checks (no device/emulator here):
   - iOS Swift: `swiftc -parse` of the full plugin against the iphoneos SDK, and
     `swiftc -typecheck` of the extracted signal-handler logic against Darwin —
