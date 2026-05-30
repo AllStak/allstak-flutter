@@ -1,5 +1,11 @@
 ## 1.1.0 — 2026-05-30
 
+### Changed — pub.dev package name
+- The published package name is now `allstak` (was `allstak_flutter`). Update your
+  dependency to `allstak: ^1.1.0` and imports to `package:allstak/allstak.dart`.
+  The wire SDK identity is unchanged: events still report `sdkName: allstak-flutter`
+  and requests still send `User-Agent: allstak-flutter/<version>`.
+
 ### Changed — Test-runtime session isolation
 - Forced session/log-bridge tests under `flutter test` no longer write the
   production file-backed open-session marker. Production abnormal-session

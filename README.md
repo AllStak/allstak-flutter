@@ -1,17 +1,17 @@
-# allstak_flutter
+# allstak
 
 AllStak SDK for Flutter and Dart apps. Captures Flutter errors, unhandled Dart errors, logs, outbound HTTP requests, route breadcrumbs, and native crashes.
 
 ## Install
 
 ```bash
-flutter pub add allstak_flutter
+flutter pub add allstak
 ```
 
 ## Setup
 
 ```dart
-import 'package:allstak_flutter/allstak_flutter.dart';
+import 'package:allstak/allstak.dart';
 import 'package:flutter/material.dart';
 
 void main() {

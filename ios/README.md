@@ -1,6 +1,6 @@
-# allstak_flutter iOS
+# allstak iOS
 
-iOS native crash support is included with `allstak_flutter`.
+iOS native crash support is included with the `allstak` package.
 
 Most apps only need the Dart setup from the package root README:
 

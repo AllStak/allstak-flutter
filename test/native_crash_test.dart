@@ -1,4 +1,4 @@
-import 'package:allstak_flutter/allstak_flutter.dart';
+import 'package:allstak/allstak.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 

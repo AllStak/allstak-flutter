@@ -1,5 +1,5 @@
 import 'package:flutter/widgets.dart';
-import 'allstak_flutter.dart';
+import 'allstak.dart';
 
 /// Drops an AllStak `navigation` breadcrumb every time a route is pushed or
 /// popped. Attach to your MaterialApp via `navigatorObservers: [AllStakNavigatorObserver()]`.

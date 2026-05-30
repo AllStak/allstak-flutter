@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:allstak_flutter/allstak_flutter.dart';
+import 'package:allstak/allstak.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// In-process ingest server (mirrors allstak_flutter_test.dart) with a

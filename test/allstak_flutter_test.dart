@@ -2,8 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:allstak_flutter/allstak_flutter.dart';
-import 'package:allstak_flutter/src/session.dart' as session_impl;
+import 'package:allstak/allstak.dart';
+import 'package:allstak/src/session.dart' as session_impl;
 
 /// Tiny HTTP server that records request bodies so we can assert payloads.
 class _IngestServer {

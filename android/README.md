@@ -1,6 +1,6 @@
-# allstak_flutter Android
+# allstak Android
 
-Android native crash support is included with `allstak_flutter`.
+Android native crash support is included with the `allstak` package.
 
 Most apps only need the Dart setup from the package root README:
 

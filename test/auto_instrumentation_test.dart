@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:allstak_flutter/allstak_flutter.dart';
+import 'package:allstak/allstak.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Tiny HTTP server that records request bodies + headers so we can assert
