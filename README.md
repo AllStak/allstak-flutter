@@ -79,8 +79,29 @@ await AllStak.instance?.captureException(
   stackTrace: StackTrace.current.toString(),
   context: {'screen': 'checkout'},
 );
+await AllStak.instance?.captureSpan(
+  traceId: traceId,
+  spanId: spanId,
+  parentSpanId: parentSpanId,
+  operation: 'http.client',
+  description: 'GET https://api.example.com/orders',
+  durationMs: 42,
+  startTimeMillis: startMs,
+  endTimeMillis: endMs,
+);
 await AllStak.instance?.flush();
+await AllStak.instance?.close();
+final diagnostics = AllStak.getDiagnostics();
 ```
+
+`captureSpan` is the low-level API for completed custom spans. Trace and span
+IDs are normalized to W3C widths before send: 32 lowercase hex characters for
+`traceId`, 16 for `spanId` and `parentSpanId`.
+
+`diagnostics` contains counters and queue sizes only: captured/sent/failed/
+dropped/persisted/replayed events, retry/rate-limit counts, compression counters,
+breadcrumb count, active trace/span counts, and session recovery count. It never
+includes event payloads, headers, breadcrumbs, user data, or secrets.
 
 ## Navigation breadcrumbs
 

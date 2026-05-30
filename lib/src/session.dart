@@ -189,6 +189,10 @@ class SessionTracker {
 
   Session? _active;
   bool _ended = false;
+  int _recoveryCount = 0;
+
+  /// Number of previous open sessions recovered by this tracker.
+  int get recoveryCount => _recoveryCount;
 
   /// Idempotent. Generates the session, records its start, sets in-memory
   /// status = ok, and POSTs `/sessions/start`. Sessions are never sampled.
@@ -310,6 +314,7 @@ class SessionTracker {
       locked['recoveredAt'] = now;
       locked['recoveryLockUntil'] = 0;
       store.write(locked);
+      _recoveryCount++;
     } catch (_) {
       locked['recoveryLockUntil'] = 0;
       store.write(locked);

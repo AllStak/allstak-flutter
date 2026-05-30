@@ -3,7 +3,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show HttpOverrides, Platform;
+import 'dart:io' show HttpOverrides, Platform, gzip;
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -29,6 +29,40 @@ export 'src/offline_queue.dart' show OfflineQueue, OfflineEntry;
 export 'src/session.dart' show Session, SessionStatus;
 
 AllStak? _instance;
+
+String _randomHex(int bytes) {
+  final random = Random.secure();
+  final values = List<int>.generate(bytes, (_) => random.nextInt(256));
+  final id = values.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  return _isAllZero(id) ? '1${id.substring(1)}' : id;
+}
+
+bool _isAllZero(String value) => RegExp(r'^0+$').hasMatch(value);
+
+String _normalizeTraceId(String? traceId) {
+  final hex =
+      (traceId ?? '').toLowerCase().replaceAll(RegExp(r'[^0-9a-f]'), '');
+  final candidate = hex.length >= 32
+      ? hex.substring(0, 32)
+      : hex.isNotEmpty
+          ? hex.padRight(32, '0')
+          : '';
+  return candidate.length == 32 && !_isAllZero(candidate)
+      ? candidate
+      : _randomHex(16);
+}
+
+String _normalizeSpanId(String? spanId) {
+  final hex = (spanId ?? '').toLowerCase().replaceAll(RegExp(r'[^0-9a-f]'), '');
+  final candidate = hex.length >= 16
+      ? hex.substring(0, 16)
+      : hex.isNotEmpty
+          ? hex.padRight(16, '0')
+          : '';
+  return candidate.length == 16 && !_isAllZero(candidate)
+      ? candidate
+      : _randomHex(8);
+}
 
 String _allstakBaggage(String traceId, String requestId, String? spanId) {
   final parts = <String>['allstak-trace_id=$traceId'];
@@ -63,6 +97,14 @@ enum _DeliveryOutcome {
   permanent,
 }
 
+class _PreparedBody {
+  const _PreparedBody(this.bytes, this.compressed, this.bytesSaved);
+
+  final List<int> bytes;
+  final bool compressed;
+  final int bytesSaved;
+}
+
 /// Thin wrapper so the MethodChannel name lives in one place and can be
 /// swapped for tests. Kept private to the library.
 class _NativeChannel {
@@ -81,6 +123,72 @@ const String kAllStakSdkVersion = '1.1.0';
 /// dependency-light automatic release mechanism for Flutter (see
 /// [resolveAllStakRelease] and the README "Release identifier" section).
 const String _kAllStakReleaseDefine = String.fromEnvironment('ALLSTAK_RELEASE');
+const int _compressionThresholdBytes = 1024;
+
+/// Privacy-safe SDK diagnostics. Contains counters and queue sizes only; never
+/// telemetry payloads, headers, tags, context values, or user data.
+class AllStakDiagnostics {
+  const AllStakDiagnostics({
+    required this.eventsCaptured,
+    required this.eventsSent,
+    required this.eventsFailed,
+    required this.eventsDropped,
+    required this.eventsPersisted,
+    required this.eventsReplayed,
+    required this.queueSize,
+    required this.retryAttempts,
+    required this.rateLimitedCount,
+    required this.compressedPayloads,
+    required this.uncompressedPayloads,
+    required this.compressionBytesSaved,
+    required this.sanitizerRedactionCount,
+    required this.activeTraceCount,
+    required this.activeSpanCount,
+    required this.breadcrumbCount,
+    required this.sessionRecoveryCount,
+    required this.disabled,
+  });
+
+  final int eventsCaptured;
+  final int eventsSent;
+  final int eventsFailed;
+  final int eventsDropped;
+  final int eventsPersisted;
+  final int eventsReplayed;
+  final int queueSize;
+  final int retryAttempts;
+  final int rateLimitedCount;
+  final int compressedPayloads;
+  final int uncompressedPayloads;
+  final int compressionBytesSaved;
+  final int sanitizerRedactionCount;
+  final int activeTraceCount;
+  final int activeSpanCount;
+  final int breadcrumbCount;
+  final int sessionRecoveryCount;
+  final bool disabled;
+
+  Map<String, Object> toJson() => {
+        'eventsCaptured': eventsCaptured,
+        'eventsSent': eventsSent,
+        'eventsFailed': eventsFailed,
+        'eventsDropped': eventsDropped,
+        'eventsPersisted': eventsPersisted,
+        'eventsReplayed': eventsReplayed,
+        'queueSize': queueSize,
+        'retryAttempts': retryAttempts,
+        'rateLimitedCount': rateLimitedCount,
+        'compressedPayloads': compressedPayloads,
+        'uncompressedPayloads': uncompressedPayloads,
+        'compressionBytesSaved': compressionBytesSaved,
+        'sanitizerRedactionCount': sanitizerRedactionCount,
+        'activeTraceCount': activeTraceCount,
+        'activeSpanCount': activeSpanCount,
+        'breadcrumbCount': breadcrumbCount,
+        'sessionRecoveryCount': sessionRecoveryCount,
+        'disabled': disabled,
+      };
+}
 
 /// Resolves the effective `release` stamped on every event.
 ///
@@ -269,6 +377,18 @@ class AllStak implements DioTelemetrySink {
   String? _traceId;
   String? _currentSpanId;
   final List<Future<void>> _pendingRequests = [];
+  int _eventsCaptured = 0;
+  int _eventsSent = 0;
+  int _eventsFailed = 0;
+  int _eventsDropped = 0;
+  int _eventsPersisted = 0;
+  int _eventsReplayed = 0;
+  int _retryAttempts = 0;
+  int _rateLimitedCount = 0;
+  int _compressedPayloads = 0;
+  int _uncompressedPayloads = 0;
+  int _compressionBytesSaved = 0;
+  int _offlineQueueSize = 0;
 
   /// Release-health session tracker. Null when auto session tracking is
   /// disabled or skipped under the test runtime. See [SessionTracker].
@@ -460,11 +580,20 @@ class AllStak implements DioTelemetrySink {
     if (queue == null) return;
     try {
       final entries = await queue.drainAll();
+      _offlineQueueSize = 0;
       for (final entry in entries) {
         final outcome = await _deliverScrubbed(entry.path, entry.body);
         if (outcome == _DeliveryOutcome.retryable) {
           // Still undeliverable — put it back so a later init retries it.
-          await queue.enqueue(entry.path, entry.body);
+          _retryAttempts++;
+          if (await queue.tryEnqueue(entry.path, entry.body)) {
+            _eventsPersisted++;
+            _offlineQueueSize++;
+          } else {
+            _eventsDropped++;
+          }
+        } else if (outcome == _DeliveryOutcome.delivered) {
+          _eventsReplayed++;
         }
       }
     } catch (_) {
@@ -478,6 +607,54 @@ class AllStak implements DioTelemetrySink {
   Future<void> awaitOfflineDrain() async => _drainComplete ?? Future.value();
 
   static AllStak? get instance => _instance;
+
+  /// Static privacy-safe diagnostics for the active singleton. Returns a
+  /// disabled zero snapshot before [init].
+  static AllStakDiagnostics getDiagnostics() =>
+      _instance?.diagnostics ??
+      AllStakDiagnostics(
+        eventsCaptured: 0,
+        eventsSent: 0,
+        eventsFailed: 0,
+        eventsDropped: 0,
+        eventsPersisted: 0,
+        eventsReplayed: 0,
+        queueSize: 0,
+        retryAttempts: 0,
+        rateLimitedCount: 0,
+        compressedPayloads: 0,
+        uncompressedPayloads: 0,
+        compressionBytesSaved: 0,
+        sanitizerRedactionCount: sanitizerRedactionCount(),
+        activeTraceCount: 0,
+        activeSpanCount: 0,
+        breadcrumbCount: 0,
+        sessionRecoveryCount: 0,
+        disabled: true,
+      );
+
+  /// Privacy-safe diagnostics for this client. Contains counters and queue
+  /// sizes only.
+  AllStakDiagnostics get diagnostics => AllStakDiagnostics(
+        eventsCaptured: _eventsCaptured,
+        eventsSent: _eventsSent,
+        eventsFailed: _eventsFailed,
+        eventsDropped: _eventsDropped,
+        eventsPersisted: _eventsPersisted,
+        eventsReplayed: _eventsReplayed,
+        queueSize: _pendingRequests.length + _offlineQueueSize,
+        retryAttempts: _retryAttempts,
+        rateLimitedCount: _rateLimitedCount,
+        compressedPayloads: _compressedPayloads,
+        uncompressedPayloads: _uncompressedPayloads,
+        compressionBytesSaved: _compressionBytesSaved,
+        sanitizerRedactionCount: sanitizerRedactionCount(),
+        activeTraceCount: _traceId == null ? 0 : 1,
+        activeSpanCount: _currentSpanId == null ? 0 : 1,
+        breadcrumbCount: _breadcrumbs.length,
+        sessionRecoveryCount: _sessionTracker?.recoveryCount ?? 0,
+        disabled: config.apiKey.isEmpty,
+      );
 
   /// True when running under `flutter test` (which sets `FLUTTER_TEST=true`).
   /// Mirrors the Java SDK's `isLikelyTestRuntime` classpath guard so unit
@@ -495,7 +672,8 @@ class AllStak implements DioTelemetrySink {
 
   void _startSessionTracking({bool force = false}) {
     if (!config.enableAutoSessionTracking) return;
-    if (!force && _isLikelyTestRuntime()) return;
+    final isTestRuntime = _isLikelyTestRuntime();
+    if (!force && isTestRuntime) return;
     if (config.apiKey.isEmpty) return;
     try {
       final tracker = SessionTracker(
@@ -505,7 +683,7 @@ class AllStak implements DioTelemetrySink {
         sdkName: config.sdkName,
         sdkVersion: config.sdkVersion,
         platform: config.platform,
-        stateStore: kIsWeb
+        stateStore: kIsWeb || (force && isTestRuntime)
             ? null
             : FileSessionStateStore.defaultFor(config.effectiveRelease),
       );
@@ -745,11 +923,11 @@ class AllStak implements DioTelemetrySink {
   }
 
   String getTraceId() {
-    return _traceId ??= _hexId(16);
+    return _traceId ??= _normalizeTraceId(null);
   }
 
   void setTraceId(String traceId) {
-    _traceId = traceId;
+    _traceId = _normalizeTraceId(traceId);
   }
 
   void resetTrace() {
@@ -927,15 +1105,20 @@ class AllStak implements DioTelemetrySink {
     int requestSize = 0,
     int responseSize = 0,
   }) async {
-    final effectiveTraceId = traceId ?? getTraceId();
+    final effectiveTraceId =
+        traceId == null ? getTraceId() : _normalizeTraceId(traceId);
     final effectiveRequestId = requestId ?? _hexId(16);
+    final effectiveSpanId = spanId == null ? null : _normalizeSpanId(spanId);
+    final effectiveParentSpanId =
+        parentSpanId == null ? null : _normalizeSpanId(parentSpanId);
     _sendBestEffort('/ingest/v1/http-requests', {
       'requests': [
         {
           'traceId': effectiveTraceId,
           'requestId': effectiveRequestId,
-          if (spanId != null) 'spanId': spanId,
-          if (parentSpanId != null) 'parentSpanId': parentSpanId,
+          if (effectiveSpanId != null) 'spanId': effectiveSpanId,
+          if (effectiveParentSpanId != null)
+            'parentSpanId': effectiveParentSpanId,
           'direction': direction,
           'method': method,
           'host': host,
@@ -954,10 +1137,61 @@ class AllStak implements DioTelemetrySink {
     });
   }
 
+  /// Capture one completed span through `/ingest/v1/spans`.
+  ///
+  /// This low-level API is intended for custom instrumentation that already
+  /// knows the span boundaries. Trace and span identifiers are normalized to W3C
+  /// widths before they are sent: 32 lowercase hex chars for `traceId`, 16 for
+  /// `spanId` and `parentSpanId`.
+  Future<void> captureSpan({
+    required String traceId,
+    required String spanId,
+    String? parentSpanId,
+    required String operation,
+    String? description,
+    String status = 'ok',
+    required int durationMs,
+    required int startTimeMillis,
+    required int endTimeMillis,
+    String? service,
+    Map<String, dynamic>? tags,
+    String? data,
+    Map<String, dynamic>? attributes,
+  }) async {
+    final normalizedTraceId = _normalizeTraceId(traceId);
+    final normalizedSpanId = _normalizeSpanId(spanId);
+    final normalizedParentSpanId =
+        parentSpanId == null ? null : _normalizeSpanId(parentSpanId);
+    _sendBestEffort('/ingest/v1/spans', {
+      'spans': [
+        {
+          'traceId': normalizedTraceId,
+          'spanId': normalizedSpanId,
+          if (normalizedParentSpanId != null)
+            'parentSpanId': normalizedParentSpanId,
+          'operation': operation.isEmpty ? 'span' : operation,
+          if (description != null) 'description': description,
+          'status': status.isEmpty ? 'ok' : status,
+          'durationMs': durationMs < 0 ? 0 : durationMs,
+          'startTimeMillis': startTimeMillis,
+          'endTimeMillis': endTimeMillis,
+          'service': service ?? config.service,
+          'environment': config.environment,
+          'release': config.effectiveRelease,
+          'platform': config.platform,
+          if (_sessionTracker?.currentSessionId != null)
+            'sessionId': _sessionTracker!.currentSessionId,
+          if (tags != null && tags.isNotEmpty) 'tags': tags,
+          if (data != null) 'data': data,
+          if (attributes != null && attributes.isNotEmpty)
+            'attributes': attributes,
+        },
+      ],
+    });
+  }
+
   String _hexId(int bytes) {
-    final random = Random.secure();
-    final values = List<int>.generate(bytes, (_) => random.nextInt(256));
-    return values.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    return _randomHex(bytes);
   }
 
   /// Installs platform-side crash handlers and drains any crash stashed by the
@@ -1092,7 +1326,11 @@ class AllStak implements DioTelemetrySink {
   }
 
   void _sendBestEffort(String path, Map<String, dynamic> payload) {
-    if (config.apiKey.isEmpty) return;
+    _eventsCaptured++;
+    if (config.apiKey.isEmpty) {
+      _eventsDropped++;
+      return;
+    }
     final future = _send(path, payload);
     _pendingRequests.add(future);
     // Auto-remove from the list when it completes so we don't leak memory.
@@ -1124,21 +1362,35 @@ class AllStak implements DioTelemetrySink {
         // ignore: avoid_print
         print('[AllStak] sanitizer failed; dropping event: $sanErr');
       }
+      _eventsFailed++;
+      _eventsDropped++;
       return;
     }
     // From here on we operate on the SCRUBBED bytes only — the same bytes that
     // would be persisted offline. Nothing unredacted ever reaches disk.
     final body = jsonEncode(scrubbed);
     final outcome = await _deliverScrubbed(path, body);
+    if (outcome != _DeliveryOutcome.delivered) {
+      _eventsFailed++;
+    }
     // Persist on a retryable failure (offline / timeout / 5xx / 429) so the
     // event survives a network outage and an app restart. Session lifecycle
     // calls are excluded — a replayed stale session would skew durations.
     if (outcome == _DeliveryOutcome.retryable && _isPersistable(path)) {
       try {
-        await _offlineQueue?.enqueue(path, body);
+        final persisted = await _offlineQueue?.tryEnqueue(path, body) ?? false;
+        if (persisted) {
+          _eventsPersisted++;
+          _offlineQueueSize++;
+        } else {
+          _eventsDropped++;
+        }
       } catch (_) {
         // Fail-open: persistence must never break capture.
+        _eventsDropped++;
       }
+    } else if (outcome != _DeliveryOutcome.delivered) {
+      _eventsDropped++;
     }
   }
 
@@ -1150,16 +1402,25 @@ class AllStak implements DioTelemetrySink {
   /// (delivered / permanently undeliverable) the entry. Never throws.
   Future<_DeliveryOutcome> _deliverScrubbed(String path, String body) async {
     final url = Uri.parse('${config.host}$path');
+    final prepared = _prepareRequestBody(body);
+    if (prepared.compressed) {
+      _compressedPayloads++;
+      _compressionBytesSaved += prepared.bytesSaved;
+    } else {
+      _uncompressedPayloads++;
+    }
+    final headers = {
+      'Content-Type': 'application/json',
+      'X-AllStak-Key': config.apiKey,
+      'User-Agent': 'allstak-flutter/$kAllStakSdkVersion',
+      if (prepared.compressed) 'Content-Encoding': 'gzip',
+    };
     try {
       final res = await http
           .post(
             url,
-            headers: {
-              'Content-Type': 'application/json',
-              'X-AllStak-Key': config.apiKey,
-              'User-Agent': 'allstak-flutter/$kAllStakSdkVersion',
-            },
-            body: body,
+            headers: headers,
+            body: prepared.bytes,
           )
           .timeout(config.transportTimeout);
       if (config.debug) {
@@ -1169,10 +1430,16 @@ class AllStak implements DioTelemetrySink {
         print('[AllStak] POST $path -> ${res.statusCode} $trim');
       }
       final code = res.statusCode;
-      if (code >= 200 && code < 300) return _DeliveryOutcome.delivered;
+      if (code >= 200 && code < 300) {
+        _eventsSent++;
+        return _DeliveryOutcome.delivered;
+      }
       // 429 (rate limited) and 5xx are transient -> keep for retry. Other 4xx
       // (bad request, auth, etc.) are permanent -> drop, don't loop forever.
-      if (code == 429 || code >= 500) return _DeliveryOutcome.retryable;
+      if (code == 429 || code >= 500) {
+        if (code == 429) _rateLimitedCount++;
+        return _DeliveryOutcome.retryable;
+      }
       return _DeliveryOutcome.permanent;
     } catch (e) {
       if (config.debug) {
@@ -1181,6 +1448,22 @@ class AllStak implements DioTelemetrySink {
       }
       // Network error / timeout / app offline -> retryable.
       return _DeliveryOutcome.retryable;
+    }
+  }
+
+  _PreparedBody _prepareRequestBody(String body) {
+    final raw = utf8.encode(body);
+    if (raw.length < _compressionThresholdBytes) {
+      return _PreparedBody(raw, false, 0);
+    }
+    try {
+      final compressed = gzip.encode(raw);
+      if (compressed.length >= raw.length) {
+        return _PreparedBody(raw, false, 0);
+      }
+      return _PreparedBody(compressed, true, raw.length - compressed.length);
+    } catch (_) {
+      return _PreparedBody(raw, false, 0);
     }
   }
 

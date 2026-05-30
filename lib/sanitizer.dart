@@ -33,6 +33,10 @@
 library;
 
 const String kRedacted = '[REDACTED]';
+int _sanitizerRedactionCount = 0;
+
+/// Process-wide sanitizer redaction count. Counter only; no payload data.
+int sanitizerRedactionCount() => _sanitizerRedactionCount;
 
 /// Exact (case-sensitive) AllStak wire field names that are non-secret
 /// correlation identifiers and must survive scrubbing. The release-health
@@ -220,6 +224,7 @@ Object? _walk(
       if (kCorrelationAllowlist.contains(key)) {
         out[key] = _walk(v, denylist, seen, options, false);
       } else if (_isSensitive(key, denylist)) {
+        _sanitizerRedactionCount++;
         out[key] = kRedacted;
       } else {
         // Value scrubbing is disabled for this child when either the whole
@@ -273,6 +278,7 @@ String _scrubValue(String input, ScrubOptions options) {
       out = out.replaceAll(_emailRe, kRedacted);
       out = out.replaceAll(_ipv4Re, kRedacted);
     }
+    if (out != input) _sanitizerRedactionCount++;
     return out;
   } catch (_) {
     // Fail-open: never let a scrubber error drop the value.

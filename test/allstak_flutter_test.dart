@@ -21,7 +21,11 @@ class _IngestServer {
         capturedHeaders[key] = values.join(',');
       });
       headers.add(capturedHeaders);
-      final raw = await utf8.decoder.bind(req).join();
+      final bytes = await req.expand((chunk) => chunk).toList();
+      final decodedBytes = capturedHeaders['content-encoding'] == 'gzip'
+          ? gzip.decode(bytes)
+          : bytes;
+      final raw = utf8.decode(decodedBytes);
       if (raw.isNotEmpty) {
         bodies.add(jsonDecode(raw) as Map<String, dynamic>);
       }
@@ -431,6 +435,61 @@ void main() {
   });
 
   // ─── Flush behavior ──────────────────────────────────────────────
+  group('diagnostics', () {
+    late _IngestServer server;
+
+    setUp(() async {
+      server = _IngestServer();
+      await server.start();
+    });
+
+    tearDown(() async {
+      await server.stop();
+    });
+
+    test('reports privacy-safe counters and active context', () async {
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
+
+      sdk.setTraceId('0af7651916cd43dd8448eb211c80319c');
+      sdk.addBreadcrumb('custom', 'ready');
+      await sdk.captureLog('info', 'hello user@example.com',
+          metadata: {'password': 'secret'});
+      await sdk.flush();
+
+      final diagnostics = sdk.diagnostics;
+      expect(diagnostics.eventsCaptured, greaterThanOrEqualTo(1));
+      expect(diagnostics.eventsSent, greaterThanOrEqualTo(1));
+      expect(diagnostics.eventsDropped, 0);
+      expect(diagnostics.activeTraceCount, 1);
+      expect(diagnostics.breadcrumbCount, 1);
+      expect(diagnostics.sanitizerRedactionCount, greaterThanOrEqualTo(1));
+      expect(diagnostics.uncompressedPayloads, greaterThanOrEqualTo(1));
+      expect(diagnostics.compressedPayloads, 0);
+      expect(diagnostics.toJson().containsKey('eventsSent'), isTrue);
+      expect(AllStak.getDiagnostics().eventsSent, diagnostics.eventsSent);
+    });
+
+    test('compresses large payloads and exposes compression counters',
+        () async {
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
+      final message = 'x' * 8000;
+
+      await sdk.captureLog('info', message);
+      await sdk.flush();
+
+      expect(server.headers.first['content-encoding'], 'gzip');
+      expect(server.bodies.first['message'], message);
+      final diagnostics = sdk.diagnostics;
+      expect(diagnostics.compressedPayloads, 1);
+      expect(diagnostics.uncompressedPayloads, 0);
+      expect(diagnostics.compressionBytesSaved, greaterThan(0));
+    });
+  });
+
   group('flush', () {
     late _IngestServer server;
 
@@ -676,13 +735,15 @@ void main() {
           tracker(<MapEntry<String, Map<String, dynamic>>>[], store).start();
 
       final secondSent = <MapEntry<String, Map<String, dynamic>>>[];
-      tracker(secondSent, store).start();
+      final second = tracker(secondSent, store);
+      second.start();
 
       final recovered = secondSent
           .firstWhere((e) => e.key == session_impl.SessionTracker.pathEnd)
           .value;
       expect(recovered['sessionId'], session.id);
       expect(recovered['status'], SessionStatus.abnormal.wire);
+      expect(second.recoveryCount, 1);
     });
 
     test('crashed open session is reported crashed on next start', () {
@@ -692,13 +753,15 @@ void main() {
       first.recordCrash();
 
       final secondSent = <MapEntry<String, Map<String, dynamic>>>[];
-      tracker(secondSent, store).start();
+      final second = tracker(secondSent, store);
+      second.start();
 
       final recovered = secondSent
           .firstWhere((e) => e.key == session_impl.SessionTracker.pathEnd)
           .value;
       expect(recovered['sessionId'], session.id);
       expect(recovered['status'], SessionStatus.crashed.wire);
+      expect(second.recoveryCount, 1);
     });
 
     test('corrupt state is cleared safely', () {
@@ -975,6 +1038,105 @@ void main() {
       expect(reqs[0]['requestSize'], 12);
       expect(reqs[0]['responseSize'], 34);
       expect((reqs[0]['metadata'] as Map).containsKey('requestId'), isFalse);
+    });
+
+    test('normalizes caller-provided trace and span ids to W3C widths',
+        () async {
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
+      sdk.setTraceId('7f3ac1d9-2b8e-4a6f-8c1a-000000000001');
+
+      await sdk.captureRequest(
+        method: 'POST',
+        host: 'api.example.com',
+        path: '/orders',
+        statusCode: 202,
+        durationMs: 10,
+        traceId: 'not-a-trace',
+        spanId: 'abcdef01-2345-6789-abcd-ef0123456789',
+        parentSpanId: '0000000000000000',
+      );
+      await sdk.flush();
+
+      final reqs = server.bodies.first['requests'] as List;
+      expect(reqs[0]['traceId'], matches(RegExp(r'^[0-9a-f]{32}$')));
+      expect(reqs[0]['traceId'], isNot('00000000000000000000000000000000'));
+      expect(reqs[0]['spanId'], 'abcdef0123456789');
+      expect(reqs[0]['parentSpanId'], matches(RegExp(r'^[0-9a-f]{16}$')));
+      expect(reqs[0]['parentSpanId'], isNot('0000000000000000'));
+      expect(sdk.getTraceId(), '7f3ac1d92b8e4a6f8c1a000000000001');
+    });
+  });
+
+  // ─── captureSpan ─────────────────────────────────────────────────
+  group('captureSpan', () {
+    late _IngestServer server;
+
+    setUp(() async {
+      server = _IngestServer();
+      await server.start();
+    });
+
+    tearDown(() async {
+      await server.stop();
+    });
+
+    test('sends W3C-normalized span payload', () async {
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
+
+      await sdk.captureSpan(
+        traceId: '550E8400-E29B-41D4-A716-446655440000',
+        spanId: 'ABCDEFABCDEF1234',
+        parentSpanId: '1234567890ABCDEF',
+        operation: 'db.sqlite.query',
+        description: 'SELECT 1',
+        status: 'ok',
+        durationMs: 3,
+        startTimeMillis: 1700000000000,
+        endTimeMillis: 1700000000003,
+        service: 'certification-flutter',
+        tags: {'db.system': 'sqlite'},
+      );
+      await sdk.flush();
+
+      expect(server.bodies, hasLength(1));
+      final spans = server.bodies.first['spans'] as List;
+      expect(spans, hasLength(1));
+      expect(spans[0]['traceId'], '550e8400e29b41d4a716446655440000');
+      expect(spans[0]['spanId'], 'abcdefabcdef1234');
+      expect(spans[0]['parentSpanId'], '1234567890abcdef');
+      expect(spans[0]['operation'], 'db.sqlite.query');
+      expect(spans[0]['service'], 'certification-flutter');
+    });
+
+    test('sanitizes span tags data and attributes before sending', () async {
+      final sdk = AllStak.init(
+        AllStakConfig(apiKey: 'ask_test', host: server.host),
+      );
+
+      await sdk.captureSpan(
+        traceId: 'a' * 32,
+        spanId: 'b' * 16,
+        operation: 'http.client',
+        description: 'GET https://example.invalid',
+        durationMs: 1,
+        startTimeMillis: 1,
+        endTimeMillis: 2,
+        tags: {'authorization': 'Bearer should_not_leak'},
+        data: 'card 4242424242424242',
+        attributes: {
+          'nested': {'apiKey': 'should_not_leak'}
+        },
+      );
+      await sdk.flush();
+
+      final serialized = jsonEncode(server.bodies.first);
+      expect(serialized.contains('should_not_leak'), isFalse);
+      expect(serialized.contains('4242424242424242'), isFalse);
+      expect(serialized.contains('[REDACTED]'), isTrue);
     });
   });
 }

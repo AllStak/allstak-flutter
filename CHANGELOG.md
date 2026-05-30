@@ -1,5 +1,12 @@
 ## 1.1.0 — 2026-05-30
 
+### Changed — Test-runtime session isolation
+- Forced session/log-bridge tests under `flutter test` no longer write the
+  production file-backed open-session marker. Production abnormal-session
+  recovery is unchanged; the change prevents parallel test runs from recovering
+  a marker left by another forced test and misreporting a normal session as
+  `abnormal`.
+
 ### Added — Auto-armed native crash capture (zero-config)
 - The native crash handlers are now **armed automatically** from `AllStak.runApp()`
   and `AllStak.init()` (right after `WidgetsFlutterBinding.ensureInitialized()`),

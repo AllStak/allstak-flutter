@@ -108,9 +108,16 @@ class OfflineQueue {
   /// error. [body] MUST already be the scrubbed wire JSON — the queue never
   /// scrubs and never persists raw data.
   Future<void> enqueue(String path, String body) async {
+    await tryEnqueue(path, body);
+  }
+
+  /// Same as [enqueue], but returns whether the entry was actually persisted.
+  /// Counter-only diagnostics use this so an unavailable store is counted as a
+  /// dropped retryable event rather than a persisted one.
+  Future<bool> tryEnqueue(String path, String body) async {
     final file = await _resolve();
-    if (file == null) return;
-    await _synchronized<void>(() async {
+    if (file == null) return false;
+    return _synchronized<bool>(() async {
       final line = jsonEncode({
         'p': path,
         'b': body,
@@ -118,7 +125,8 @@ class OfflineQueue {
       });
       await file.writeAsString('$line\n', mode: FileMode.append, flush: true);
       await _enforceBounds(file);
-    }, null);
+      return true;
+    }, false);
   }
 
   /// Atomically read every valid (non-expired) entry, clear the spool, and

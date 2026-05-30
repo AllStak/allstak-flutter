@@ -164,6 +164,9 @@ void main() {
       // Both error + log landed on disk (scrubbed).
       final persisted = makeQueue();
       expect(await persisted.count(), 2);
+      expect(sdk.diagnostics.eventsPersisted, 2);
+      expect(sdk.diagnostics.queueSize, greaterThanOrEqualTo(2));
+      expect(sdk.diagnostics.eventsDropped, 0);
     });
 
     test('scrubs BEFORE persisting — no secret reaches the spool', () async {
@@ -219,6 +222,8 @@ void main() {
       // Both persisted events were re-sent and the spool was cleared.
       expect(server.bodies.length, 2);
       expect(await makeQueue().count(), 0);
+      expect(sdk.diagnostics.eventsReplayed, 2);
+      expect(sdk.diagnostics.eventsSent, 2);
     });
 
     test('retryable failures (5xx) are re-persisted, not lost, on drain',
